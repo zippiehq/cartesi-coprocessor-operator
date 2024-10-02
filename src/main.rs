@@ -1,6 +1,7 @@
 use advance_runner::run_advance;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Response, Server, StatusCode};
+use regex::Regex;
 use sha3::{Digest, Keccak256};
 use std::{
     collections::HashMap,
@@ -9,7 +10,6 @@ use std::{
     io::{Error, ErrorKind, Read},
     net::SocketAddr,
 };
-
 const CHUNK_SIZE: usize = 131072;
 
 #[async_std::main]
@@ -22,6 +22,34 @@ async fn main() {
 
             match (req.method().clone(), &segments as &[&str]) {
                 (hyper::Method::POST, ["lambda", machine_hash, lambda_hash]) => {
+                    let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
+
+                    if !hash_regex.is_match(machine_hash) {
+                        let json_error = serde_json::json!({
+                            "error": "machine_hash should contain only symbols a-f 0-9 and have length 64",
+                        });
+                        let json_error = serde_json::to_string(&json_error).unwrap();
+                        let response = Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .body(Body::from(json_error))
+                            .unwrap();
+
+                        return Ok::<_, Infallible>(response);
+                    }
+
+                    if !hash_regex.is_match(lambda_hash) {
+                        let json_error = serde_json::json!({
+                            "error": "lambda_hash should contain only symbols a-f 0-9 and have length 64",
+                        });
+                        let json_error = serde_json::to_string(&json_error).unwrap();
+                        let response = Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .body(Body::from(json_error))
+                            .unwrap();
+
+                        return Ok::<_, Infallible>(response);
+                    }
+
                     let payload = hyper::body::to_bytes(req.into_body())
                         .await
                         .unwrap()
