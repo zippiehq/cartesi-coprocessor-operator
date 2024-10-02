@@ -31,16 +31,22 @@ async fn main() {
                     hasher.update(payload.clone());
                     let payload_keccak = hasher.finalize();
 
-                    let lambda_state_next = format!(
-                        "{}-{}-{}",
+                    let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
+
+                    let lambda_state_next_path = format!(
+                        "{}/{}-{}-{}",
+                        snapshot_dir,
                         machine_hash,
                         lambda_hash,
                         hex::encode(payload_keccak)
                     );
+                    let machine_snapshot_path = format!("{}/{}", snapshot_dir, machine_hash);
+                    let lambda_state_previous_path = format!("{}/{}", snapshot_dir, lambda_hash);
+
                     run_advance(
-                        machine_hash.to_string(),
-                        lambda_hash,
-                        lambda_state_next.as_str(),
+                        machine_snapshot_path,
+                        lambda_state_previous_path.as_str(),
+                        lambda_state_next_path.as_str(),
                         payload.to_vec(),
                         HashMap::new(),
                         Box::new(report_callback),
@@ -50,7 +56,7 @@ async fn main() {
                     .unwrap();
 
                     let mut file_lambda_state_next =
-                        File::open(lambda_state_next.as_str()).unwrap();
+                        File::open(lambda_state_next_path.as_str()).unwrap();
 
                     let mut file_lambda_state_next_buffer: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
 
@@ -69,8 +75,13 @@ async fn main() {
 
                     let file_keccak = hasher.finalize();
                     std::fs::rename(
-                        lambda_state_next.as_str(),
-                        format!("{}-{}", machine_hash, hex::encode(file_keccak)),
+                        lambda_state_next_path.as_str(),
+                        format!(
+                            "{}/{}-{}",
+                            snapshot_dir,
+                            machine_hash,
+                            hex::encode(file_keccak)
+                        ),
                     )
                     .unwrap();
 
