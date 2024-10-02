@@ -9,6 +9,9 @@ use std::{
     io::{Error, ErrorKind, Read},
     net::SocketAddr,
 };
+
+const CHUNK_SIZE: usize = 131072;
+
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
@@ -48,13 +51,22 @@ async fn main() {
 
                     let mut file_lambda_state_next =
                         File::open(lambda_state_next.as_str()).unwrap();
-                    let mut file_lambda_state_next_buffer = Vec::new();
-                    file_lambda_state_next
-                        .read_to_end(&mut file_lambda_state_next_buffer)
-                        .unwrap();
+
+                    let mut file_lambda_state_next_buffer: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
 
                     let mut hasher = Keccak256::new();
-                    hasher.update(file_lambda_state_next_buffer);
+
+                    loop {
+                        let read_bytes_count = file_lambda_state_next
+                            .read(&mut file_lambda_state_next_buffer)
+                            .unwrap();
+
+                        hasher.update(&file_lambda_state_next_buffer[0..read_bytes_count]);
+                        if read_bytes_count < CHUNK_SIZE {
+                            break;
+                        }
+                    }
+
                     let file_keccak = hasher.finalize();
                     std::fs::rename(
                         lambda_state_next.as_str(),
