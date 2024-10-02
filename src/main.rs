@@ -71,6 +71,13 @@ async fn main() {
                     let machine_snapshot_path = format!("{}/{}", snapshot_dir, machine_hash);
                     let lambda_state_previous_path = format!("{}/{}", snapshot_dir, lambda_hash);
 
+                    let mut outputs_vector = Vec::new();
+                    let output_callback = |reason: u16, payload: &[u8]| {
+                        let mut result: Result<(u16, Vec<u8>), Error> =
+                            Ok((reason, payload.to_vec()));
+                        outputs_vector.push(result.as_mut().unwrap().clone());
+                        return result;
+                    };
                     run_advance(
                         machine_snapshot_path,
                         lambda_state_previous_path.as_str(),
@@ -78,8 +85,9 @@ async fn main() {
                         payload.to_vec(),
                         HashMap::new(),
                         Box::new(report_callback),
-                        Box::new(output_callback),
+                        &mut Box::new(output_callback),
                         HashMap::new(),
+                        false,
                     )
                     .unwrap();
 
@@ -140,9 +148,5 @@ async fn main() {
     server.await.unwrap();
 }
 fn report_callback(reason: u16, payload: &[u8]) -> Result<(u16, Vec<u8>), Error> {
-    return Err(Error::from(ErrorKind::Other));
-}
-
-fn output_callback(reason: u16, payload: &[u8]) -> Result<(u16, Vec<u8>), Error> {
     return Err(Error::from(ErrorKind::Other));
 }
