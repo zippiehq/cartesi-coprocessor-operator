@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     fs::File,
-    io::{Error, ErrorKind, Read},
+    io::{Error, Read},
     net::SocketAddr,
 };
 const CHUNK_SIZE: usize = 131072;
@@ -78,13 +78,21 @@ async fn main() {
                         outputs_vector.push(result.as_mut().unwrap().clone());
                         return result;
                     };
+
+                    let mut reports_vector = Vec::new();
+                    let report_callback = |reason: u16, payload: &[u8]| {
+                        let mut result: Result<(u16, Vec<u8>), Error> =
+                            Ok((reason, payload.to_vec()));
+                        reports_vector.push(result.as_mut().unwrap().clone());
+                        return result;
+                    };
                     run_advance(
                         machine_snapshot_path,
                         lambda_state_previous_path.as_str(),
                         lambda_state_next_path.as_str(),
                         payload.to_vec(),
                         HashMap::new(),
-                        Box::new(report_callback),
+                        &mut Box::new(report_callback),
                         &mut Box::new(output_callback),
                         HashMap::new(),
                         false,
@@ -121,9 +129,16 @@ async fn main() {
                     )
                     .unwrap();
 
+                    let json_response = serde_json::json!({
+                       "file_keccak":  hex::encode(file_keccak),
+                       "outputs_callback_vector": outputs_vector,
+                       "reports_callback_vector": reports_vector,
+                    });
+                    let json_response = serde_json::to_string(&json_response).unwrap();
+
                     let response = Response::builder()
                         .status(StatusCode::OK)
-                        .body(Body::from(hex::encode(file_keccak)))
+                        .body(Body::from(json_response))
                         .unwrap();
 
                     return Ok::<_, Infallible>(response);
@@ -152,7 +167,4 @@ async fn main() {
     let server = Server::bind(&addr).serve(Box::new(service));
     println!("Server is listening on {}", addr);
     server.await.unwrap();
-}
-fn report_callback(reason: u16, payload: &[u8]) -> Result<(u16, Vec<u8>), Error> {
-    return Err(Error::from(ErrorKind::Other));
 }
