@@ -128,6 +128,11 @@ async fn main() {
 
                     return Ok::<_, Infallible>(response);
                 }
+                (hyper::Method::GET, ["health"]) => {
+                    let json_request = r#"{"healthy": "true"}"#;
+                    let response = Response::new(Body::from(json_request));
+                    return Ok::<_, Infallible>(response);
+                }
                 _ => {
                     let json_error = serde_json::json!({
                         "error": "unknown request",
@@ -145,6 +150,7 @@ async fn main() {
     });
 
     let server = Server::bind(&addr).serve(Box::new(service));
+    println!("Server is listening on {}", addr);
     server.await.unwrap();
 }
 fn report_callback(reason: u16, payload: &[u8]) -> Result<(u16, Vec<u8>), Error> {
