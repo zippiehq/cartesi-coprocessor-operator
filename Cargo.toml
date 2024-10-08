@@ -12,3 +12,12 @@ tokio = { version = "1", features = ["full"] }
 hex = "0.4"
 serde_json = "1.0.107"
 regex = "1.11.0"
+dotenv = "0.15.0"
+
+eigen-crypto-bls = { git = "https://github.com/Layr-Labs/eigensdk-rs", rev = "f69a9a943462f2a1635936ba5aa2f929ad718073", optional = true }
+
+[features]
+default = []
+bls_signing = [
+    "eigen-crypto-bls",
+]

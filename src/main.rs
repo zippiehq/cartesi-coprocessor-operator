@@ -12,6 +12,13 @@ use std::{
 };
 const CHUNK_SIZE: usize = 131072;
 
+#[cfg(feature = "bls_signing")]
+use eigen_crypto_bn254_bls::{BlsKeyPair, Signature};
+#[cfg(feature = "bls_signing")]
+use ark_serialize::CanonicalSerialize;
+#[cfg(feature = "bls_signing")]
+use sha2::{Digest as Sha2Digest, Sha256};
+
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
@@ -129,11 +136,43 @@ async fn main() {
                     )
                     .unwrap();
 
-                    let json_response = serde_json::json!({
-                       "file_keccak":  hex::encode(file_keccak),
+                    let mut json_response = serde_json::json!({
+                       "file_keccak":  hex::encode(&file_keccak),
                        "outputs_callback_vector": outputs_vector,
                        "reports_callback_vector": reports_vector,
                     });
+
+                    #[cfg(feature = "bls_signing")]
+                    {
+                        let bls_private_key_str =
+                            std::env::var("BLS_PRIVATE_KEY").expect("BLS_PRIVATE_KEY not set");
+                        let bls_key_pair = BlsKeyPair::new(bls_private_key_str)
+                            .expect("Invalid BLS private key");
+
+                        let machine_hash_bytes = hex::decode(machine_hash).expect("Invalid machine_hash hex");
+                        let lambda_hash_bytes = hex::decode(lambda_hash).expect("Invalid lambda_hash hex");
+                        let final_lambda_hash_bytes = file_keccak.to_vec();
+
+                        let mut buffer = Vec::new();
+                        buffer.extend_from_slice(&machine_hash_bytes);
+                        buffer.extend_from_slice(&lambda_hash_bytes);
+                        buffer.extend_from_slice(&final_lambda_hash_bytes);
+
+                        let sha256_hash = Sha256::digest(&buffer);
+
+                        let signature = bls_key_pair.sign_message(&sha256_hash);
+
+                        let mut signature_bytes = Vec::new();
+                        signature
+                            .g1_point()
+                            .g1()
+                            .serialize_uncompressed(&mut signature_bytes)
+                            .unwrap();
+                        let signature_hex = hex::encode(&signature_bytes);
+
+                        json_response["signature"] = serde_json::Value::String(signature_hex);
+                    }
+
                     let json_response = serde_json::to_string(&json_response).unwrap();
 
                     let response = Response::builder()
