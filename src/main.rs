@@ -1,11 +1,13 @@
 use advance_runner::run_advance;
-use async_std::stream::StreamExt;
+use async_std::fs::OpenOptions;
+use cid::Cid;
+use futures::TryStreamExt;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Request, Response, Server, StatusCode};
+use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
-use serde_json::Value;
+use rs_car_ipfs::single_file::read_single_file_seek;
 use sha3::{Digest, Keccak256};
-use std::io::Write;
 use std::path::Path;
 use std::{
     collections::HashMap,
@@ -203,8 +205,8 @@ async fn main() {
                     if signing_requested {
                         let bls_private_key_str =
                             std::env::var("BLS_PRIVATE_KEY").expect("BLS_PRIVATE_KEY not set");
-                        let bls_key_pair = BlsKeyPair::new(bls_private_key_str)
-                            .expect("Invalid BLS private key");
+                        let bls_key_pair =
+                            BlsKeyPair::new(bls_private_key_str).expect("Invalid BLS private key");
 
                         let mut buffer = vec![0u8; 12];
                         buffer.extend_from_slice(&ruleset_bytes);
@@ -244,8 +246,9 @@ async fn main() {
                     return Ok::<_, Infallible>(response);
                 }
 
-                (hyper::Method::POST, ["ensure", cid, machine_hash]) => {
+                (hyper::Method::POST, ["ensure", cid_str, machine_hash]) => {
                     let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
+
                     if !hash_regex.is_match(machine_hash) {
                         let json_error = serde_json::json!({
                             "error": "machine_hash should contain only symbols a-f 0-9 and have length 64",
@@ -258,10 +261,10 @@ async fn main() {
 
                         return Ok::<_, Infallible>(response);
                     }
+
                     let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
                     let machine_dir = format!("{}/{}", snapshot_dir, machine_hash);
 
-                    //machine directory already exists?
                     if Path::new(&machine_dir).exists() {
                         let json_error = serde_json::json!({
                             "error": "Machine directory already exists",
@@ -275,25 +278,32 @@ async fn main() {
                         return Ok::<_, Infallible>(response);
                     }
 
-                    let client = Client::new();
+                    let directory_cid = match cid_str.parse::<Cid>() {
+                        Ok(cid) => cid,
+                        Err(_) => {
+                            let json_error = serde_json::json!({
+                                "error": "Invalid CID",
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+                            let response = Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from(json_error))
+                                .unwrap();
 
-                    // IPFS API URL
-                    let ipfs_api_url = std::env::var("IPFS_API_URL").unwrap_or("http://127.0.0.1:5001".to_string());
+                            return Ok::<_, Infallible>(response);
+                        }
+                    };
 
-                    // what's in the directory
-                    let ls_url = format!("{}/api/v0/ls?arg=/ipfs/{}", ipfs_api_url, cid);
+                    let ipfs_url =
+                        std::env::var("IPFS_URL").unwrap_or("http://127.0.0.1:5001".to_string());
 
-                    let req = Request::builder()
-                        .method("POST")
-                        .uri(ls_url)
-                        .body(Body::empty())
-                        .unwrap();
-
-                    let res = client.request(req).await.unwrap();
-
-                    if !res.status().is_success() {
+                    if let Err(err) =
+                        dedup_download_directory(&ipfs_url, directory_cid, machine_dir.clone())
+                            .await
+                    {
+                        let _ = std::fs::remove_dir_all(&machine_dir);
                         let json_error = serde_json::json!({
-                            "error": format!("Failed to list CID: HTTP {}", res.status()),
+                            "error": format!("Failed to download directory: {}", err),
                         });
                         let json_error = serde_json::to_string(&json_error).unwrap();
                         let response = Response::builder()
@@ -304,32 +314,14 @@ async fn main() {
                         return Ok::<_, Infallible>(response);
                     }
 
-                    let body_bytes = hyper::body::to_bytes(res.into_body()).await.unwrap();
+                    let hash_path = format!("{}/hash", machine_dir);
 
-                    let ls_response: Value = serde_json::from_slice(&body_bytes).unwrap();
-
-                    let links = ls_response["Objects"][0]["Links"].as_array().unwrap();
-
-                    std::fs::create_dir_all(&machine_dir).unwrap();
-
-                    for link in links {
-                        let file_name = link["Name"].as_str().unwrap();
-                        let file_cid = link["Hash"].as_str().unwrap();
-
-                        let cat_url = format!("{}/api/v0/cat?arg={}", ipfs_api_url, file_cid);
-
-                        let req = Request::builder()
-                            .method("POST")
-                            .uri(cat_url)
-                            .body(Body::empty())
-                            .unwrap();
-
-                        let res = client.request(req).await.unwrap();
-
-                        if !res.status().is_success() {
-                            std::fs::remove_dir_all(&machine_dir).unwrap();
+                    let expected_hash_bytes = match async_std::fs::read(&hash_path).await {
+                        Ok(bytes) => bytes,
+                        Err(err) => {
+                            let _ = std::fs::remove_dir_all(&machine_dir);
                             let json_error = serde_json::json!({
-                                "error": format!("Failed to download file {}: HTTP {}", file_name, res.status()),
+                                "error": format!("Failed to read hash file: {}", err),
                             });
                             let json_error = serde_json::to_string(&json_error).unwrap();
                             let response = Response::builder()
@@ -339,27 +331,27 @@ async fn main() {
 
                             return Ok::<_, Infallible>(response);
                         }
+                    };
 
-                        let mut body = res.into_body();
+                    let machine_hash_bytes = match hex::decode(machine_hash) {
+                        Ok(bytes) => bytes,
+                        Err(_) => {
+                            let _ = std::fs::remove_dir_all(&machine_dir);
+                            let json_error = serde_json::json!({
+                                "error": "Invalid machine_hash: must be valid hex",
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+                            let response = Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from(json_error))
+                                .unwrap();
 
-                        let file_path = format!("{}/{}", machine_dir, file_name);
-
-                        let mut out_file = File::create(&file_path).unwrap();
-
-                        while let Some(chunk) = body.next().await {
-                            let chunk = chunk.unwrap();
-                            out_file.write_all(&chunk).unwrap();
+                            return Ok::<_, Infallible>(response);
                         }
-                    }
-
-                    let hash_path = format!("{}/hash", machine_dir);
-
-                    let expected_hash_bytes = async_std::fs::read(&hash_path).await.unwrap();
-
-                    let machine_hash_bytes = hex::decode(machine_hash).unwrap();
+                    };
 
                     if expected_hash_bytes != machine_hash_bytes {
-                        std::fs::remove_dir_all(&machine_dir).unwrap();
+                        let _ = std::fs::remove_dir_all(&machine_dir);
                         let json_error = serde_json::json!({
                             "error": "Expected hash from /hash file does not match machine_hash",
                         });
@@ -409,4 +401,59 @@ async fn main() {
     let server = Server::bind(&addr).serve(Box::new(service));
     println!("Server is listening on {}", addr);
     server.await.unwrap();
+}
+
+async fn dedup_download_directory(
+    ipfs_url: &str,
+    directory_cid: Cid,
+    out_file_path: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ipfs_client =
+        <ipfs_api_backend_hyper::IpfsClient as ipfs_api_backend_hyper::TryFromUri>::from_str(
+            ipfs_url,
+        )?;
+    let res = ipfs_client
+        .ls(&format!("/ipfs/{}", directory_cid.to_string()))
+        .await?;
+
+    let first_object = res
+        .objects
+        .first()
+        .ok_or("No objects in IPFS ls response")?;
+
+    std::fs::create_dir_all(&out_file_path)?;
+
+    for val in &first_object.links {
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("{}/api/v0/dag/export?arg={}", ipfs_url, val.hash))
+            .body(Body::empty())
+            .unwrap();
+
+        let client = Client::new();
+
+        match client.request(req).await {
+            Ok(res) => {
+                let mut f = res
+                    .into_body()
+                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "Error!"))
+                    .into_async_read();
+
+                let file_path = format!("{}/{}", out_file_path, val.name);
+                let mut out = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&file_path)
+                    .await?;
+
+                read_single_file_seek(&mut f, &mut out, None).await?;
+            }
+            Err(err) => {
+                return Err(format!("Error downloading file {}: {}", val.name, err).into());
+            }
+        }
+    }
+
+    Ok(())
 }
