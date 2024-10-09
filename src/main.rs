@@ -8,6 +8,8 @@ use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
 use sha3::{Digest, Keccak256};
+use std::fs::OpenOptions as StdOpenOptions;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::{
     collections::HashMap,
@@ -264,117 +266,185 @@ async fn main() {
 
                     let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
                     let machine_dir = format!("{}/{}", snapshot_dir, machine_hash);
+                    let lock_file_path = format!("{}.lock", machine_dir);
 
                     if Path::new(&machine_dir).exists() {
-                        let json_error = serde_json::json!({
-                            "error": "Machine directory already exists",
-                        });
-                        let json_error = serde_json::to_string(&json_error).unwrap();
-                        let response = Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from(json_error))
-                            .unwrap();
-
-                        return Ok::<_, Infallible>(response);
-                    }
-
-                    let directory_cid = match cid_str.parse::<Cid>() {
-                        Ok(cid) => cid,
-                        Err(_) => {
-                            let json_error = serde_json::json!({
-                                "error": "Invalid CID",
+                        if Path::new(&lock_file_path).exists() {
+                            let json_response = serde_json::json!({
+                                "state": "downloading",
                             });
-                            let json_error = serde_json::to_string(&json_error).unwrap();
+                            let json_response = serde_json::to_string(&json_response).unwrap();
+
                             let response = Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Body::from(json_error))
+                                .status(StatusCode::OK)
+                                .body(Body::from(json_response))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        } else {
+                            let json_response = serde_json::json!({
+                                "state": "ready",
+                            });
+                            let json_response = serde_json::to_string(&json_response).unwrap();
+
+                            let response = Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(json_response))
                                 .unwrap();
 
                             return Ok::<_, Infallible>(response);
                         }
-                    };
+                    } else {
+                        match StdOpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create_new(true)
+                            .open(&lock_file_path)
+                        {
+                            Ok(_) => {
+                                let directory_cid = match cid_str.parse::<Cid>() {
+                                    Ok(cid) => cid,
+                                    Err(_) => {
+                                        let _ = std::fs::remove_file(&lock_file_path);
 
-                    let ipfs_url =
-                        std::env::var("IPFS_URL").unwrap_or("http://127.0.0.1:5001".to_string());
+                                        let json_error = serde_json::json!({
+                                            "error": "Invalid CID",
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::BAD_REQUEST)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
 
-                    if let Err(err) =
-                        dedup_download_directory(&ipfs_url, directory_cid, machine_dir.clone())
-                            .await
-                    {
-                        let _ = std::fs::remove_dir_all(&machine_dir);
-                        let json_error = serde_json::json!({
-                            "error": format!("Failed to download directory: {}", err),
-                        });
-                        let json_error = serde_json::to_string(&json_error).unwrap();
-                        let response = Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from(json_error))
-                            .unwrap();
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
 
-                        return Ok::<_, Infallible>(response);
-                    }
+                                let ipfs_url = std::env::var("IPFS_URL")
+                                    .unwrap_or("http://127.0.0.1:5001".to_string());
 
-                    let hash_path = format!("{}/hash", machine_dir);
+                                if let Err(err) = dedup_download_directory(
+                                    &ipfs_url,
+                                    directory_cid,
+                                    machine_dir.clone(),
+                                )
+                                .await
+                                {
+                                    let _ = std::fs::remove_dir_all(&machine_dir);
+                                    let _ = std::fs::remove_file(&lock_file_path);
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Failed to download directory: {}", err),
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
 
-                    let expected_hash_bytes = match async_std::fs::read(&hash_path).await {
-                        Ok(bytes) => bytes,
-                        Err(err) => {
-                            let _ = std::fs::remove_dir_all(&machine_dir);
-                            let json_error = serde_json::json!({
-                                "error": format!("Failed to read hash file: {}", err),
-                            });
-                            let json_error = serde_json::to_string(&json_error).unwrap();
-                            let response = Response::builder()
-                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                .body(Body::from(json_error))
-                                .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
 
-                            return Ok::<_, Infallible>(response);
+                                let hash_path = format!("{}/hash", machine_dir);
+
+                                let expected_hash_bytes = match async_std::fs::read(&hash_path)
+                                    .await
+                                {
+                                    Ok(bytes) => bytes,
+                                    Err(err) => {
+                                        let _ = std::fs::remove_dir_all(&machine_dir);
+                                        let _ = std::fs::remove_file(&lock_file_path);
+                                        let json_error = serde_json::json!({
+                                            "error": format!("Failed to read hash file: {}", err),
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
+
+                                let machine_hash_bytes = match hex::decode(machine_hash) {
+                                    Ok(bytes) => bytes,
+                                    Err(_) => {
+                                        let _ = std::fs::remove_dir_all(&machine_dir);
+                                        let _ = std::fs::remove_file(&lock_file_path);
+                                        let json_error = serde_json::json!({
+                                            "error": "Invalid machine_hash: must be valid hex",
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::BAD_REQUEST)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
+
+                                if expected_hash_bytes != machine_hash_bytes {
+                                    let _ = std::fs::remove_dir_all(&machine_dir);
+                                    let _ = std::fs::remove_file(&lock_file_path);
+                                    let json_error = serde_json::json!({
+                                        "error": "Expected hash from /hash file does not match machine_hash",
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+
+                                    return Ok::<_, Infallible>(response);
+                                }
+
+                                let _ = std::fs::remove_file(&lock_file_path);
+
+                                let json_response = serde_json::json!({
+                                    "state": "downloaded",
+                                });
+                                let json_response = serde_json::to_string(&json_response).unwrap();
+
+                                let response = Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Body::from(json_response))
+                                    .unwrap();
+
+                                return Ok::<_, Infallible>(response);
+                            }
+                            Err(e) => {
+                                if e.kind() == ErrorKind::AlreadyExists {
+                                    let json_response = serde_json::json!({
+                                        "state": "downloading",
+                                    });
+                                    let json_response =
+                                        serde_json::to_string(&json_response).unwrap();
+
+                                    let response = Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(json_response))
+                                        .unwrap();
+
+                                    return Ok::<_, Infallible>(response);
+                                } else {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Failed to create lock file: {}", e),
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            }
                         }
-                    };
-
-                    let machine_hash_bytes = match hex::decode(machine_hash) {
-                        Ok(bytes) => bytes,
-                        Err(_) => {
-                            let _ = std::fs::remove_dir_all(&machine_dir);
-                            let json_error = serde_json::json!({
-                                "error": "Invalid machine_hash: must be valid hex",
-                            });
-                            let json_error = serde_json::to_string(&json_error).unwrap();
-                            let response = Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Body::from(json_error))
-                                .unwrap();
-
-                            return Ok::<_, Infallible>(response);
-                        }
-                    };
-
-                    if expected_hash_bytes != machine_hash_bytes {
-                        let _ = std::fs::remove_dir_all(&machine_dir);
-                        let json_error = serde_json::json!({
-                            "error": "Expected hash from /hash file does not match machine_hash",
-                        });
-                        let json_error = serde_json::to_string(&json_error).unwrap();
-                        let response = Response::builder()
-                            .status(StatusCode::INTERNAL_SERVER_ERROR)
-                            .body(Body::from(json_error))
-                            .unwrap();
-
-                        return Ok::<_, Infallible>(response);
                     }
-
-                    let json_response = serde_json::json!({
-                        "status": "success",
-                    });
-                    let json_response = serde_json::to_string(&json_response).unwrap();
-
-                    let response = Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Body::from(json_response))
-                        .unwrap();
-
-                    return Ok::<_, Infallible>(response);
                 }
 
                 (hyper::Method::GET, ["health"]) => {
