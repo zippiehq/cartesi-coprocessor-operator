@@ -1,8 +1,12 @@
 use advance_runner::run_advance;
+use async_std::stream::StreamExt;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Response, Server, StatusCode};
+use hyper::{Body, Client, Request, Response, Server, StatusCode};
 use regex::Regex;
+use serde_json::Value;
 use sha3::{Digest, Keccak256};
+use std::io::Write;
+use std::path::Path;
 use std::{
     collections::HashMap,
     convert::Infallible,
@@ -189,7 +193,7 @@ async fn main() {
                     )
                     .unwrap();
 
-                    let mut json_response = serde_json::json!({
+                    let json_response = serde_json::json!({
                        "file_keccak":  hex::encode(&file_keccak),
                        "outputs_callback_vector": outputs_vector,
                        "reports_callback_vector": reports_vector,
@@ -239,6 +243,148 @@ async fn main() {
 
                     return Ok::<_, Infallible>(response);
                 }
+
+                (hyper::Method::POST, ["ensure", cid, machine_hash]) => {
+                    let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
+                    if !hash_regex.is_match(machine_hash) {
+                        let json_error = serde_json::json!({
+                            "error": "machine_hash should contain only symbols a-f 0-9 and have length 64",
+                        });
+                        let json_error = serde_json::to_string(&json_error).unwrap();
+                        let response = Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .body(Body::from(json_error))
+                            .unwrap();
+
+                        return Ok::<_, Infallible>(response);
+                    }
+                    let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
+                    let machine_dir = format!("{}/{}", snapshot_dir, machine_hash);
+
+                    //machine directory already exists?
+                    if Path::new(&machine_dir).exists() {
+                        let json_error = serde_json::json!({
+                            "error": "Machine directory already exists",
+                        });
+                        let json_error = serde_json::to_string(&json_error).unwrap();
+                        let response = Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .body(Body::from(json_error))
+                            .unwrap();
+
+                        return Ok::<_, Infallible>(response);
+                    }
+
+                    let client = Client::new();
+
+                    // IPFS API URL
+                    let ipfs_api_url = std::env::var("IPFS_API_URL").unwrap_or("http://127.0.0.1:5001".to_string());
+
+                    // what's in the directory
+                    let ls_url = format!("{}/api/v0/ls?arg=/ipfs/{}", ipfs_api_url, cid);
+
+                    let req = Request::builder()
+                        .method("POST")
+                        .uri(ls_url)
+                        .body(Body::empty())
+                        .unwrap();
+
+                    let res = client.request(req).await.unwrap();
+
+                    if !res.status().is_success() {
+                        let json_error = serde_json::json!({
+                            "error": format!("Failed to list CID: HTTP {}", res.status()),
+                        });
+                        let json_error = serde_json::to_string(&json_error).unwrap();
+                        let response = Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from(json_error))
+                            .unwrap();
+
+                        return Ok::<_, Infallible>(response);
+                    }
+
+                    let body_bytes = hyper::body::to_bytes(res.into_body()).await.unwrap();
+
+                    let ls_response: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+                    let links = ls_response["Objects"][0]["Links"].as_array().unwrap();
+
+                    std::fs::create_dir_all(&machine_dir).unwrap();
+
+                    for link in links {
+                        let file_name = link["Name"].as_str().unwrap();
+                        let file_cid = link["Hash"].as_str().unwrap();
+
+                        let cat_url = format!("{}/api/v0/cat?arg={}", ipfs_api_url, file_cid);
+
+                        let req = Request::builder()
+                            .method("POST")
+                            .uri(cat_url)
+                            .body(Body::empty())
+                            .unwrap();
+
+                        let res = client.request(req).await.unwrap();
+
+                        if !res.status().is_success() {
+                            std::fs::remove_dir_all(&machine_dir).unwrap();
+                            let json_error = serde_json::json!({
+                                "error": format!("Failed to download file {}: HTTP {}", file_name, res.status()),
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+                            let response = Response::builder()
+                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                .body(Body::from(json_error))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
+
+                        let mut body = res.into_body();
+
+                        let file_path = format!("{}/{}", machine_dir, file_name);
+
+                        let mut out_file = File::create(&file_path).unwrap();
+
+                        while let Some(chunk) = body.next().await {
+                            let chunk = chunk.unwrap();
+                            out_file.write_all(&chunk).unwrap();
+                        }
+                    }
+
+                    let hash_path = format!("{}/hash", machine_dir);
+
+                    let expected_hash_bytes = async_std::fs::read(&hash_path).await.unwrap();
+
+                    let machine_hash_bytes = hex::decode(machine_hash).unwrap();
+
+                    if expected_hash_bytes != machine_hash_bytes {
+                        std::fs::remove_dir_all(&machine_dir).unwrap();
+                        let json_error = serde_json::json!({
+                            "error": "Expected hash from /hash file does not match machine_hash",
+                        });
+                        let json_error = serde_json::to_string(&json_error).unwrap();
+                        let response = Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .body(Body::from(json_error))
+                            .unwrap();
+
+                        return Ok::<_, Infallible>(response);
+                    }
+
+                    let json_response = serde_json::json!({
+                        "status": "success",
+                    });
+                    let json_response = serde_json::to_string(&json_response).unwrap();
+
+                    let response = Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(json_response))
+                        .unwrap();
+
+                    return Ok::<_, Infallible>(response);
+                }
+
                 (hyper::Method::GET, ["health"]) => {
                     let json_request = r#"{"healthy": "true"}"#;
                     let response = Response::new(Body::from(json_request));
