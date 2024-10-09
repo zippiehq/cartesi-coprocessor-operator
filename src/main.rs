@@ -248,7 +248,7 @@ async fn main() {
                     return Ok::<_, Infallible>(response);
                 }
 
-                (hyper::Method::POST, ["ensure", cid_str, machine_hash]) => {
+                (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                     let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
 
                     if !hash_regex.is_match(machine_hash) {
@@ -263,6 +263,22 @@ async fn main() {
 
                         return Ok::<_, Infallible>(response);
                     }
+
+                    let expected_size: u64 = match size_str.parse::<u64>() {
+                        Ok(size) => size,
+                        Err(_) => {
+                            let json_error = serde_json::json!({
+                                "error": "Invalid size: must be a positive integer",
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+                            let response = Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(Body::from(json_error))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
+                    };
 
                     let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
                     let machine_dir = format!("{}/{}", snapshot_dir, machine_hash);
@@ -323,6 +339,94 @@ async fn main() {
 
                                 let ipfs_url = std::env::var("IPFS_URL")
                                     .unwrap_or("http://127.0.0.1:5001".to_string());
+
+                                let stat_uri =
+                                    format!("{}/api/v0/dag/stat?arg={}", ipfs_url, cid_str);
+
+                                let stat_req = Request::builder()
+                                    .method("POST")
+                                    .uri(stat_uri)
+                                    .body(Body::empty())
+                                    .unwrap();
+
+                                let client = Client::new();
+
+                                let stat_res = match client.request(stat_req).await {
+                                    Ok(res) => res,
+                                    Err(err) => {
+                                        let _ = std::fs::remove_file(&lock_file_path);
+
+                                        let json_error = serde_json::json!({
+                                            "error": format!("Failed to get DAG stat: {}", err),
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
+
+                                let stat_body_bytes =
+                                    hyper::body::to_bytes(stat_res.into_body()).await.unwrap();
+
+                                let stat_json: serde_json::Value = match serde_json::from_slice(
+                                    &stat_body_bytes,
+                                ) {
+                                    Ok(json) => json,
+                                    Err(err) => {
+                                        let _ = std::fs::remove_file(&lock_file_path);
+
+                                        let json_error = serde_json::json!({
+                                            "error": format!("Failed to parse DAG stat response: {}", err),
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
+
+                                let actual_size = match stat_json["Size"].as_u64() {
+                                    Some(size) => size,
+                                    None => {
+                                        let _ = std::fs::remove_file(&lock_file_path);
+
+                                        let json_error = serde_json::json!({
+                                            "error": "Failed to get Size from DAG stat response",
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
+
+                                if actual_size != expected_size {
+                                    let _ = std::fs::remove_file(&lock_file_path);
+
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Size mismatch: expected {}, got {}", expected_size, actual_size),
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+
+                                    return Ok::<_, Infallible>(response);
+                                }
 
                                 if let Err(err) = dedup_download_directory(
                                     &ipfs_url,
