@@ -104,9 +104,9 @@ async fn main() {
                             }
                         };
 
-                        if ruleset_bytes.len() != 32 {
+                        if ruleset_bytes.len() != 20 {
                             let json_error = serde_json::json!({
-                                "error": "Invalid X-Ruleset header: must decode to 32 bytes",
+                                "error": "Invalid X-Ruleset header: must decode to 20 bytes",
                             });
                             let json_error = serde_json::to_string(&json_error).unwrap();
                             let response = Response::builder()
@@ -117,7 +117,6 @@ async fn main() {
                             return Ok::<_, Infallible>(response);
                         }
                     }
-
                     let payload = hyper::body::to_bytes(req.into_body())
                         .await
                         .unwrap()
@@ -197,7 +196,7 @@ async fn main() {
                     )
                     .unwrap();
 
-                    let json_response = serde_json::json!({
+                    let mut json_response = serde_json::json!({
                        "file_keccak":  hex::encode(&file_keccak),
                        "outputs_callback_vector": outputs_vector,
                        "reports_callback_vector": reports_vector,
