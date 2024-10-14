@@ -1,13 +1,17 @@
-use advance_runner::run_advance;
+use advance_runner::{run_advance, YieldManualReason};
+mod outputs_merkle;
+use advance_runner::RunAdvanceLambdaStatePaths;
+use alloy_primitives::utils::Keccak256;
+use alloy_primitives::B256;
 use async_std::fs::OpenOptions;
 use cid::Cid;
 use futures::TryStreamExt;
+use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Request, Response, Server, StatusCode};
 use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
-use sha3::{Digest, Keccak256};
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -37,86 +41,34 @@ async fn main() {
 
             match (req.method().clone(), &segments as &[&str]) {
                 (hyper::Method::POST, ["lambda", machine_hash, lambda_hash]) => {
-                    let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
-
-                    if !hash_regex.is_match(machine_hash) {
-                        let json_error = serde_json::json!({
-                            "error": "machine_hash should contain only symbols a-f 0-9 and have length 64",
-                        });
-                        let json_error = serde_json::to_string(&json_error).unwrap();
-                        let response = Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from(json_error))
-                            .unwrap();
-
-                        return Ok::<_, Infallible>(response);
+                    //Check machine_hash format
+                    if let Err(err_response) = check_hash_format(
+                        machine_hash,
+                        "machine_hash should contain only symbols a-f 0-9 and have length 64",
+                    ) {
+                        return Ok::<_, Infallible>(err_response);
                     }
 
-                    if !hash_regex.is_match(lambda_hash) {
-                        let json_error = serde_json::json!({
-                            "error": "lambda_hash should contain only symbols a-f 0-9 and have length 64",
-                        });
-                        let json_error = serde_json::to_string(&json_error).unwrap();
-                        let response = Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
-                            .body(Body::from(json_error))
-                            .unwrap();
-
-                        return Ok::<_, Infallible>(response);
+                    //Check lambda_hash format
+                    if let Err(err_response) = check_hash_format(
+                        lambda_hash,
+                        "lambda_hash should contain only symbols a-f 0-9 and have length 64",
+                    ) {
+                        return Ok::<_, Infallible>(err_response);
                     }
 
                     let ruleset_header = req.headers().get("X-Ruleset");
 
                     let signing_requested = std::env::var("BLS_PRIVATE_KEY").is_ok();
 
-                    let mut ruleset_bytes = Vec::new();
-
-                    if signing_requested {
-                        let ruleset_hex = match ruleset_header {
-                            Some(value) => value.to_str().unwrap_or_default(),
-                            None => {
-                                let json_error = serde_json::json!({
-                                    "error": "X-Ruleset header is required when signing is requested",
-                                });
-                                let json_error = serde_json::to_string(&json_error).unwrap();
-                                let response = Response::builder()
-                                    .status(StatusCode::BAD_REQUEST)
-                                    .body(Body::from(json_error))
-                                    .unwrap();
-
-                                return Ok::<_, Infallible>(response);
-                            }
-                        };
-
-                        ruleset_bytes = match hex::decode(ruleset_hex) {
+                    let ruleset_bytes = if signing_requested {
+                        match signing(ruleset_header) {
                             Ok(bytes) => bytes,
-                            Err(_) => {
-                                let json_error = serde_json::json!({
-                                    "error": "Invalid X-Ruleset header: must be valid hex",
-                                });
-                                let json_error = serde_json::to_string(&json_error).unwrap();
-                                let response = Response::builder()
-                                    .status(StatusCode::BAD_REQUEST)
-                                    .body(Body::from(json_error))
-                                    .unwrap();
-
-                                return Ok::<_, Infallible>(response);
-                            }
-                        };
-
-                        if ruleset_bytes.len() != 20 {
-                            let json_error = serde_json::json!({
-                                "error": "Invalid X-Ruleset header: must decode to 20 bytes",
-                            });
-                            let json_error = serde_json::to_string(&json_error).unwrap();
-                            let response = Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Body::from(json_error))
-                                .unwrap();
-
-                            return Ok::<_, Infallible>(response);
+                            Err(err_response) => return Ok::<_, Infallible>(err_response),
                         }
-                    }
+                    } else {
+                        Vec::new()
+                    };
                     let payload = hyper::body::to_bytes(req.into_body())
                         .await
                         .unwrap()
@@ -153,14 +105,22 @@ async fn main() {
                         reports_vector.push(result.as_mut().unwrap().clone());
                         return result;
                     };
+
+                    let finish_callback = |reason: u16, payload: &[u8]| {
+                        let result: Result<(u16, Vec<u8>), Error> = Ok((reason, payload.to_vec()));
+                        return result;
+                    };
                     run_advance(
                         machine_snapshot_path,
-                        lambda_state_previous_path.as_str(),
-                        lambda_state_next_path.as_str(),
+                        Some(RunAdvanceLambdaStatePaths {
+                            lambda_state_previous_path,
+                            lambda_state_next_path: lambda_state_next_path.clone(),
+                        }),
                         payload.to_vec(),
                         HashMap::new(),
                         &mut Box::new(report_callback),
                         &mut Box::new(output_callback),
+                        &mut Box::new(finish_callback),
                         HashMap::new(),
                         false,
                     )
@@ -246,23 +206,163 @@ async fn main() {
 
                     return Ok::<_, Infallible>(response);
                 }
+                (hyper::Method::POST, ["classic", machine_hash]) => {
+                    //Check machine_hash format
+                    if let Err(err_response) = check_hash_format(
+                        machine_hash,
+                        "machine_hash should contain only symbols a-f 0-9 and have length 64",
+                    ) {
+                        return Ok::<_, Infallible>(err_response);
+                    }
 
-                (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
-                    let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
+                    let ruleset_header = req.headers().get("X-Ruleset");
 
-                    if !hash_regex.is_match(machine_hash) {
+                    let signing_requested = std::env::var("BLS_PRIVATE_KEY").is_ok();
+
+                    let ruleset_bytes = if signing_requested {
+                        match signing(ruleset_header) {
+                            Ok(bytes) => bytes,
+                            Err(err_response) => return Ok::<_, Infallible>(err_response),
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                    let payload = hyper::body::to_bytes(req.into_body())
+                        .await
+                        .unwrap()
+                        .to_vec();
+
+                    let mut hasher = Keccak256::new();
+                    hasher.update(payload.clone());
+                    let payload_keccak = hasher.finalize();
+
+                    let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
+
+                    let machine_snapshot_path = format!("{}/{}", snapshot_dir, machine_hash);
+
+                    let mut outputs_vector = Vec::new();
+                    let output_callback = |reason: u16, payload: &[u8]| {
+                        let mut result: Result<(u16, Vec<u8>), Error> =
+                            Ok((reason, payload.to_vec()));
+                        outputs_vector.push(result.as_mut().unwrap().clone());
+                        return result;
+                    };
+
+                    let mut reports_vector = Vec::new();
+                    let report_callback = |reason: u16, payload: &[u8]| {
+                        let mut result: Result<(u16, Vec<u8>), Error> =
+                            Ok((reason, payload.to_vec()));
+                        reports_vector.push(result.as_mut().unwrap().clone());
+                        return result;
+                    };
+
+                    let mut finish_result: (u16, Vec<u8>) = (0, vec![0]);
+
+                    let finish_callback = |reason: u16, payload: &[u8]| {
+                        let mut result: Result<(u16, Vec<u8>), Error> =
+                            Ok((reason, payload.to_vec()));
+                        finish_result = result.as_mut().unwrap().clone();
+                        return result;
+                    };
+                    let reason = run_advance(
+                        machine_snapshot_path,
+                        None,
+                        payload.to_vec(),
+                        HashMap::new(),
+                        &mut Box::new(report_callback),
+                        &mut Box::new(output_callback),
+                        &mut Box::new(finish_callback),
+                        HashMap::new(),
+                        false,
+                    )
+                    .unwrap();
+
+                    //generating proofs for each output
+
+                    let mut keccak_outputs = Vec::new();
+
+                    for output in &outputs_vector {
+                        let mut hasher = Keccak256::new();
+                        hasher.update(output.1.clone());
+                        let output_keccak = B256::from(hasher.finalize());
+                        keccak_outputs.push(output_keccak);
+                    }
+
+                    let proofs = outputs_merkle::create_proofs(keccak_outputs, 0).unwrap();
+                    let mut hasher = Keccak256::new();
+                    hasher.update(finish_result.1.clone());
+                    let finish_result_keccak = B256::from(hasher.finalize());
+
+                    if proofs.0 != finish_result_keccak {
                         let json_error = serde_json::json!({
-                            "error": "machine_hash should contain only symbols a-f 0-9 and have length 64",
+                            "error": "outputs weren't proven successfully",
                         });
                         let json_error = serde_json::to_string(&json_error).unwrap();
+
                         let response = Response::builder()
-                            .status(StatusCode::BAD_REQUEST)
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
                             .body(Body::from(json_error))
                             .unwrap();
 
                         return Ok::<_, Infallible>(response);
                     }
 
+                    let mut json_response = serde_json::json!({
+                       "outputs_callback_vector": outputs_vector,
+                       "reports_callback_vector": reports_vector,
+                    });
+
+                    #[cfg(feature = "bls_signing")]
+                    if signing_requested {
+                        let bls_private_key_str =
+                            std::env::var("BLS_PRIVATE_KEY").expect("BLS_PRIVATE_KEY not set");
+                        let bls_key_pair =
+                            BlsKeyPair::new(bls_private_key_str).expect("Invalid BLS private key");
+
+                        let mut buffer = vec![0u8; 12];
+                        buffer.extend_from_slice(&ruleset_bytes);
+
+                        let machine_hash_bytes =
+                            hex::decode(machine_hash).expect("Invalid machine_hash hex");
+
+                        buffer.extend_from_slice(&machine_hash_bytes);
+                        buffer.extend_from_slice(&payload_keccak.to_vec());
+
+                        let sha256_hash = Sha256::digest(&buffer);
+
+                        let signature = bls_key_pair.sign_message(&sha256_hash);
+
+                        let mut signature_bytes = Vec::new();
+                        signature
+                            .g1_point()
+                            .g1()
+                            .serialize_uncompressed(&mut signature_bytes)
+                            .unwrap();
+                        let signature_hex = hex::encode(&signature_bytes);
+                        if reason == YieldManualReason::Accepted {
+                            json_response["finish_callback"] = serde_json::json!(finish_result);
+                        }
+                        json_response["signature"] = serde_json::Value::String(signature_hex);
+                    }
+
+                    let json_response = serde_json::to_string(&json_response).unwrap();
+
+                    let response = Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(json_response))
+                        .unwrap();
+
+                    return Ok::<_, Infallible>(response);
+                }
+                (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
+                    //Check machine_hash format
+                    if let Err(err_response) = check_hash_format(
+                        machine_hash,
+                        "machine_hash should contain only symbols a-f 0-9 and have length 64",
+                    ) {
+                        return Ok::<_, Infallible>(err_response);
+                    }
                     let expected_size: u64 = match size_str.parse::<u64>() {
                         Ok(size) => size,
                         Err(_) => {
@@ -574,6 +674,73 @@ async fn main() {
     let server = Server::bind(&addr).serve(Box::new(service));
     println!("Server is listening on {}", addr);
     server.await.unwrap();
+}
+
+fn check_hash_format(hash: &str, error_message: &str) -> Result<(), Response<Body>> {
+    let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
+
+    if !hash_regex.is_match(hash) {
+        let json_error = serde_json::json!({
+            "error": error_message,
+        });
+        let json_error = serde_json::to_string(&json_error).unwrap();
+        let response = Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(json_error))
+            .unwrap();
+
+        return Err(response);
+    }
+    return Ok(());
+}
+
+fn signing(ruleset_header: Option<&HeaderValue>) -> Result<Vec<u8>, Response<Body>> {
+    let mut ruleset_bytes: Vec<u8> = Vec::new();
+    let ruleset_hex = match ruleset_header {
+        Some(value) => value.to_str().unwrap_or_default(),
+        None => {
+            let json_error = serde_json::json!({
+                "error": "X-Ruleset header is required when signing is requested",
+            });
+            let json_error = serde_json::to_string(&json_error).unwrap();
+            let response = Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json_error))
+                .unwrap();
+
+            return Err(response);
+        }
+    };
+
+    ruleset_bytes = match hex::decode(ruleset_hex) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let json_error = serde_json::json!({
+                "error": "Invalid X-Ruleset header: must be valid hex",
+            });
+            let json_error = serde_json::to_string(&json_error).unwrap();
+            let response = Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from(json_error))
+                .unwrap();
+
+            return Err(response);
+        }
+    };
+
+    if ruleset_bytes.len() != 20 {
+        let json_error = serde_json::json!({
+            "error": "Invalid X-Ruleset header: must decode to 20 bytes",
+        });
+        let json_error = serde_json::to_string(&json_error).unwrap();
+        let response = Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Body::from(json_error))
+            .unwrap();
+
+        return Err(response);
+    }
+    return Ok(ruleset_bytes);
 }
 
 async fn dedup_download_directory(

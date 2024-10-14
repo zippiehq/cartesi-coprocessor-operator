@@ -5,7 +5,6 @@ edition = "2021"
 
 [dependencies]
 async-std = { version = "1", features = ["attributes", "tokio1"] }
-sha3 = "0.10.8"
 advance_runner = {git = "https://github.com/dymchenkko/advance_runner"}
 hyper = { version = "0.14", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
@@ -21,6 +20,7 @@ rs-car-ipfs = { git = "https://github.com/zippiehq/rs-car-ipfs" }
 ipfs-api-backend-hyper = { version = "0.6.0", features = ["with-send-sync"], default-features = false }
 futures = "0.3"
 cid = "0.8.6"
+alloy-primitives = "0.8.7"
 
 [features]
 default = []
