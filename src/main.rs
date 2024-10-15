@@ -23,6 +23,7 @@ use std::{
     net::SocketAddr,
 };
 const CHUNK_SIZE: usize = 131072;
+const HEIGHT: usize = 63;
 
 #[cfg(feature = "bls_signing")]
 use ark_serialize::CanonicalSerialize;
@@ -289,7 +290,7 @@ async fn main() {
                         keccak_outputs.push(output_keccak);
                     }
 
-                    let proofs = outputs_merkle::create_proofs(keccak_outputs, 0).unwrap();
+                    let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
                     let mut hasher = Keccak256::new();
                     hasher.update(finish_result.1.clone());
                     let finish_result_keccak = B256::from(hasher.finalize());
