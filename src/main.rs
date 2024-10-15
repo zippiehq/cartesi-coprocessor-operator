@@ -291,11 +291,7 @@ async fn main() {
                     }
 
                     let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
-                    let mut hasher = Keccak256::new();
-                    hasher.update(finish_result.1.clone());
-                    let finish_result_keccak = B256::from(hasher.finalize());
-
-                    if proofs.0 != finish_result_keccak {
+                    if proofs.0.to_vec() != finish_result.1 {
                         let json_error = serde_json::json!({
                             "error": "outputs weren't proven successfully",
                         });
