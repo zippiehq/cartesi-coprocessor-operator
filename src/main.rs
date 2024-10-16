@@ -3,7 +3,6 @@ mod outputs_merkle;
 use alloy_primitives::utils::Keccak256;
 use alloy_primitives::B256;
 use async_std::fs::OpenOptions;
-use async_std::task::{self, sleep};
 use cid::Cid;
 use futures::TryStreamExt;
 use hyper::header::HeaderValue;
@@ -17,13 +16,13 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 use std::{
     collections::HashMap,
     convert::Infallible,
-    io::{Error, Read},
+    io::Error,
     net::SocketAddr,
 };
+use async_std::task;
 const CHUNK_SIZE: usize = 131072;
 const HEIGHT: usize = 63;
 
@@ -177,6 +176,7 @@ async fn main() {
 
                         buffer.extend_from_slice(&machine_hash_bytes);
                         buffer.extend_from_slice(&payload_keccak.to_vec());
+                        buffer.extend_from_slice(&finish_result.lock().unwrap().1);
 
                         let sha256_hash = Sha256::digest(&buffer);
 
@@ -191,6 +191,8 @@ async fn main() {
                         let signature_hex = hex::encode(&signature_bytes);
                         if *reason.lock().unwrap() == Some(YieldManualReason::Accepted) {
                             json_response["finish_callback"] = serde_json::json!(*finish_result);
+                        } else {
+                            json_response["finish_callback"] = serde_json::json!(*finish_result.lock().unwrap().1);
                         }
                         json_response["signature"] = serde_json::Value::String(signature_hex);
                     }
@@ -341,7 +343,6 @@ async fn main() {
                                         return Ok::<_, Infallible>(response);
                                     }
                                 };
-
                                 let actual_size = match stat_json["Size"].as_u64() {
                                     Some(size) => size,
                                     None => {
