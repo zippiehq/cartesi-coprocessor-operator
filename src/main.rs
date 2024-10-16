@@ -1,9 +1,9 @@
 use advance_runner::{run_advance, YieldManualReason};
 mod outputs_merkle;
-use advance_runner::RunAdvanceLambdaStatePaths;
 use alloy_primitives::utils::Keccak256;
 use alloy_primitives::B256;
 use async_std::fs::OpenOptions;
+use async_std::task::{self, sleep};
 use cid::Cid;
 use futures::TryStreamExt;
 use hyper::header::HeaderValue;
@@ -15,10 +15,12 @@ use rs_car_ipfs::single_file::read_single_file_seek;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
 use std::{
     collections::HashMap,
     convert::Infallible,
-    fs::File,
     io::{Error, Read},
     net::SocketAddr,
 };
@@ -31,7 +33,6 @@ use ark_serialize::CanonicalSerialize;
 use eigen_crypto_bls::{BlsKeyPair, Signature};
 #[cfg(feature = "bls_signing")]
 use sha2::{Digest as Sha2Digest, Sha256};
-
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
@@ -39,174 +40,7 @@ async fn main() {
         Ok::<_, Infallible>(service_fn(move |req| async move {
             let path = req.uri().path().to_owned();
             let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
             match (req.method().clone(), &segments as &[&str]) {
-                (hyper::Method::POST, ["lambda", machine_hash, lambda_hash]) => {
-                    //Check machine_hash format
-                    if let Err(err_response) = check_hash_format(
-                        machine_hash,
-                        "machine_hash should contain only symbols a-f 0-9 and have length 64",
-                    ) {
-                        return Ok::<_, Infallible>(err_response);
-                    }
-
-                    //Check lambda_hash format
-                    if let Err(err_response) = check_hash_format(
-                        lambda_hash,
-                        "lambda_hash should contain only symbols a-f 0-9 and have length 64",
-                    ) {
-                        return Ok::<_, Infallible>(err_response);
-                    }
-
-                    let ruleset_header = req.headers().get("X-Ruleset");
-
-                    let signing_requested = std::env::var("BLS_PRIVATE_KEY").is_ok();
-
-                    let ruleset_bytes = if signing_requested {
-                        match signing(ruleset_header) {
-                            Ok(bytes) => bytes,
-                            Err(err_response) => return Ok::<_, Infallible>(err_response),
-                        }
-                    } else {
-                        Vec::new()
-                    };
-                    let payload = hyper::body::to_bytes(req.into_body())
-                        .await
-                        .unwrap()
-                        .to_vec();
-
-                    let mut hasher = Keccak256::new();
-                    hasher.update(payload.clone());
-                    let payload_keccak = hasher.finalize();
-
-                    let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
-
-                    let lambda_state_next_path = format!(
-                        "{}/{}-{}-{}",
-                        snapshot_dir,
-                        machine_hash,
-                        lambda_hash,
-                        hex::encode(payload_keccak)
-                    );
-                    let machine_snapshot_path = format!("{}/{}", snapshot_dir, machine_hash);
-                    let lambda_state_previous_path = format!("{}/{}", snapshot_dir, lambda_hash);
-
-                    let mut outputs_vector = Vec::new();
-                    let output_callback = |reason: u16, payload: &[u8]| {
-                        let mut result: Result<(u16, Vec<u8>), Error> =
-                            Ok((reason, payload.to_vec()));
-                        outputs_vector.push(result.as_mut().unwrap().clone());
-                        return result;
-                    };
-
-                    let mut reports_vector = Vec::new();
-                    let report_callback = |reason: u16, payload: &[u8]| {
-                        let mut result: Result<(u16, Vec<u8>), Error> =
-                            Ok((reason, payload.to_vec()));
-                        reports_vector.push(result.as_mut().unwrap().clone());
-                        return result;
-                    };
-
-                    let finish_callback = |reason: u16, payload: &[u8]| {
-                        let result: Result<(u16, Vec<u8>), Error> = Ok((reason, payload.to_vec()));
-                        return result;
-                    };
-                    run_advance(
-                        machine_snapshot_path,
-                        Some(RunAdvanceLambdaStatePaths {
-                            lambda_state_previous_path,
-                            lambda_state_next_path: lambda_state_next_path.clone(),
-                        }),
-                        payload.to_vec(),
-                        HashMap::new(),
-                        &mut Box::new(report_callback),
-                        &mut Box::new(output_callback),
-                        &mut Box::new(finish_callback),
-                        HashMap::new(),
-                        false,
-                    )
-                    .unwrap();
-
-                    let mut file_lambda_state_next =
-                        File::open(lambda_state_next_path.as_str()).unwrap();
-
-                    let mut file_lambda_state_next_buffer: [u8; CHUNK_SIZE] = [0; CHUNK_SIZE];
-
-                    let mut hasher = Keccak256::new();
-
-                    loop {
-                        let read_bytes_count = file_lambda_state_next
-                            .read(&mut file_lambda_state_next_buffer)
-                            .unwrap();
-
-                        hasher.update(&file_lambda_state_next_buffer[0..read_bytes_count]);
-                        if read_bytes_count < CHUNK_SIZE {
-                            break;
-                        }
-                    }
-
-                    let file_keccak = hasher.finalize();
-                    std::fs::rename(
-                        lambda_state_next_path.as_str(),
-                        format!(
-                            "{}/{}-{}",
-                            snapshot_dir,
-                            machine_hash,
-                            hex::encode(file_keccak)
-                        ),
-                    )
-                    .unwrap();
-
-                    let mut json_response = serde_json::json!({
-                       "file_keccak":  hex::encode(&file_keccak),
-                       "outputs_callback_vector": outputs_vector,
-                       "reports_callback_vector": reports_vector,
-                    });
-
-                    #[cfg(feature = "bls_signing")]
-                    if signing_requested {
-                        let bls_private_key_str =
-                            std::env::var("BLS_PRIVATE_KEY").expect("BLS_PRIVATE_KEY not set");
-                        let bls_key_pair =
-                            BlsKeyPair::new(bls_private_key_str).expect("Invalid BLS private key");
-
-                        let mut buffer = vec![0u8; 12];
-                        buffer.extend_from_slice(&ruleset_bytes);
-
-                        let machine_hash_bytes =
-                            hex::decode(machine_hash).expect("Invalid machine_hash hex");
-                        let lambda_hash_bytes =
-                            hex::decode(lambda_hash).expect("Invalid lambda_hash hex");
-                        let final_lambda_hash_bytes = file_keccak.to_vec();
-
-                        buffer.extend_from_slice(&machine_hash_bytes);
-                        buffer.extend_from_slice(&lambda_hash_bytes);
-                        buffer.extend_from_slice(&final_lambda_hash_bytes);
-
-                        let sha256_hash = Sha256::digest(&buffer);
-
-                        let signature = bls_key_pair.sign_message(&sha256_hash);
-
-                        let mut signature_bytes = Vec::new();
-                        signature
-                            .g1_point()
-                            .g1()
-                            .serialize_uncompressed(&mut signature_bytes)
-                            .unwrap();
-                        let signature_hex = hex::encode(&signature_bytes);
-
-                        json_response["signature"] = serde_json::Value::String(signature_hex);
-                    }
-
-                    let json_response = serde_json::to_string(&json_response).unwrap();
-
-                    let response = Response::builder()
-                        .status(StatusCode::OK)
-                        .body(Body::from(json_response))
-                        .unwrap();
-
-                    return Ok::<_, Infallible>(response);
-                }
                 (hyper::Method::POST, ["classic", machine_hash]) => {
                     //Check machine_hash format
                     if let Err(err_response) = check_hash_format(
@@ -239,51 +73,70 @@ async fn main() {
                     let payload_keccak = hasher.finalize();
 
                     let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
+                    let mut keccak_outputs = Vec::new();
+                    let outputs_vector: Arc<Mutex<Vec<(u16, Vec<u8>)>>> =
+                        Arc::new(Mutex::new(Vec::new()));
+                    let reports_vector: Arc<Mutex<Vec<(u16, Vec<u8>)>>> =
+                        Arc::new(Mutex::new(Vec::new()));
+                    let finish_result: Arc<Mutex<(u16, Vec<u8>)>> =
+                        Arc::new(Mutex::new((0, vec![0])));
 
+                    let reason = Arc::new(Mutex::new(None));
                     let machine_snapshot_path = format!("{}/{}", snapshot_dir, machine_hash);
+                    task::spawn({
+                        let outputs_vector = outputs_vector.clone();
+                        let reports_vector = reports_vector.clone();
+                        let finish_result = finish_result.clone();
+                        let reason = reason.clone();
 
-                    let mut outputs_vector = Vec::new();
-                    let output_callback = |reason: u16, payload: &[u8]| {
-                        let mut result: Result<(u16, Vec<u8>), Error> =
-                            Ok((reason, payload.to_vec()));
-                        outputs_vector.push(result.as_mut().unwrap().clone());
-                        return result;
-                    };
+                        async move {
+                            let output_callback = |reason: u16, payload: &[u8]| {
+                                let mut result: Result<(u16, Vec<u8>), Error> =
+                                    Ok((reason, payload.to_vec()));
+                                outputs_vector
+                                    .lock()
+                                    .unwrap()
+                                    .push(result.as_mut().unwrap().clone());
+                                return result;
+                            };
 
-                    let mut reports_vector = Vec::new();
-                    let report_callback = |reason: u16, payload: &[u8]| {
-                        let mut result: Result<(u16, Vec<u8>), Error> =
-                            Ok((reason, payload.to_vec()));
-                        reports_vector.push(result.as_mut().unwrap().clone());
-                        return result;
-                    };
+                            let report_callback = |reason: u16, payload: &[u8]| {
+                                let mut result: Result<(u16, Vec<u8>), Error> =
+                                    Ok((reason, payload.to_vec()));
+                                reports_vector
+                                    .lock()
+                                    .unwrap()
+                                    .push(result.as_mut().unwrap().clone());
+                                return result;
+                            };
 
-                    let mut finish_result: (u16, Vec<u8>) = (0, vec![0]);
-
-                    let finish_callback = |reason: u16, payload: &[u8]| {
-                        let mut result: Result<(u16, Vec<u8>), Error> =
-                            Ok((reason, payload.to_vec()));
-                        finish_result = result.as_mut().unwrap().clone();
-                        return result;
-                    };
-                    let reason = run_advance(
-                        machine_snapshot_path,
-                        None,
-                        payload.to_vec(),
-                        HashMap::new(),
-                        &mut Box::new(report_callback),
-                        &mut Box::new(output_callback),
-                        &mut Box::new(finish_callback),
-                        HashMap::new(),
-                        false,
-                    )
-                    .unwrap();
+                            let finish_callback = |reason: u16, payload: &[u8]| {
+                                let mut result: Result<(u16, Vec<u8>), Error> =
+                                    Ok((reason, payload.to_vec()));
+                                *finish_result.lock().unwrap() = result.as_mut().unwrap().clone();
+                                return result;
+                            };
+                            *reason.lock().unwrap() = Some(
+                                run_advance(
+                                    machine_snapshot_path,
+                                    None,
+                                    payload.to_vec(),
+                                    HashMap::new(),
+                                    &mut Box::new(report_callback),
+                                    &mut Box::new(output_callback),
+                                    &mut Box::new(finish_callback),
+                                    HashMap::new(),
+                                    false,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                    })
+                    .await;
 
                     //generating proofs for each output
 
-                    let mut keccak_outputs = Vec::new();
-
-                    for output in &outputs_vector {
+                    for output in &*outputs_vector.lock().unwrap() {
                         let mut hasher = Keccak256::new();
                         hasher.update(output.1.clone());
                         let output_keccak = B256::from(hasher.finalize());
@@ -291,7 +144,7 @@ async fn main() {
                     }
 
                     let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
-                    if proofs.0.to_vec() != finish_result.1 {
+                    if proofs.0.to_vec() != finish_result.lock().unwrap().1 {
                         let json_error = serde_json::json!({
                             "error": "outputs weren't proven successfully",
                         });
@@ -306,10 +159,9 @@ async fn main() {
                     }
 
                     let mut json_response = serde_json::json!({
-                       "outputs_callback_vector": outputs_vector,
-                       "reports_callback_vector": reports_vector,
+                       "outputs_callback_vector": *outputs_vector,
+                       "reports_callback_vector": *reports_vector,
                     });
-
                     #[cfg(feature = "bls_signing")]
                     if signing_requested {
                         let bls_private_key_str =
@@ -337,8 +189,8 @@ async fn main() {
                             .serialize_uncompressed(&mut signature_bytes)
                             .unwrap();
                         let signature_hex = hex::encode(&signature_bytes);
-                        if reason == YieldManualReason::Accepted {
-                            json_response["finish_callback"] = serde_json::json!(finish_result);
+                        if *reason.lock().unwrap() == Some(YieldManualReason::Accepted) {
+                            json_response["finish_callback"] = serde_json::json!(*finish_result);
                         }
                         json_response["signature"] = serde_json::Value::String(signature_hex);
                     }
@@ -646,7 +498,6 @@ async fn main() {
                         }
                     }
                 }
-
                 (hyper::Method::GET, ["health"]) => {
                     let json_request = r#"{"healthy": "true"}"#;
                     let response = Response::new(Body::from(json_request));
@@ -672,7 +523,16 @@ async fn main() {
     println!("Server is listening on {}", addr);
     server.await.unwrap();
 }
-
+async fn request_handler() -> Response<Body> {
+    let json_error = serde_json::json!({
+        "error": format!("Failed to create lock file:"),
+    });
+    let json_error = serde_json::to_string(&json_error).unwrap();
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from(json_error))
+        .unwrap()
+}
 fn check_hash_format(hash: &str, error_message: &str) -> Result<(), Response<Body>> {
     let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
 
