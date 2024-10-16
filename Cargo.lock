@@ -20,7 +20,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 [[package]]
 name = "advance_runner"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/advance_runner#c1af009cbfed4c7184c217ee36c8b34c29d67690"
+source = "git+https://github.com/dymchenkko/advance_runner?rev=e339fa348305262733acb84399817d1458595eff#e339fa348305262733acb84399817d1458595eff"
 dependencies = [
  "alloy-primitives 0.7.7",
  "alloy-sol-types",
