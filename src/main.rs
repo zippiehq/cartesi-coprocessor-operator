@@ -2,6 +2,7 @@ use advance_runner::run_advance;
 mod outputs_merkle;
 use alloy_primitives::utils::Keccak256;
 use alloy_primitives::B256;
+use async_std::channel::bounded;
 use async_std::fs::OpenOptions;
 use cid::Cid;
 use futures::TryStreamExt;
@@ -11,15 +12,15 @@ use hyper::{Body, Client, Request, Response, Server, StatusCode};
 use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
+use std::collections::HashMap;
 use std::fs::OpenOptions as StdOpenOptions;
+use std::io::Error;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::{collections::HashMap, convert::Infallible, io::Error, net::SocketAddr};
-use tokio::sync::Semaphore;
+use std::{convert::Infallible, net::SocketAddr};
 const HEIGHT: usize = 63;
-const MAX_THREADS_NUMBER: usize = 3;
 
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
@@ -32,14 +33,21 @@ use sha2::{Digest as Sha2Digest, Sha256};
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
-    let semaphore = Arc::new(Semaphore::new(MAX_THREADS_NUMBER));
-
+    let max_threads_number = std::env::var("MAX_THREADS_NUMBER")
+        .unwrap_or("3".to_string())
+        .parse::<usize>()
+        .unwrap();
+    let pool = Arc::new(
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(max_threads_number)
+            .build()
+            .unwrap(),
+    );
     let service = make_service_fn(|_| {
-        let semaphore = semaphore.clone();
-
+        let pool = pool.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
-                let semaphore = semaphore.clone();
+                let pool = pool.clone();
 
                 async move {
                     let path = req.uri().path().to_owned();
@@ -80,65 +88,69 @@ async fn main() {
                                 Arc::new(Mutex::new(Vec::new()));
                             let finish_result: Arc<Mutex<(u16, Vec<u8>)>> =
                                 Arc::new(Mutex::new((0, vec![0])));
-
-                            let reason = Arc::new(Mutex::new(None));
                             let machine_snapshot_path =
                                 format!("{}/{}", snapshot_dir, machine_hash);
-                            tokio::spawn({
-                                let outputs_vector = outputs_vector.clone();
-                                let reports_vector = reports_vector.clone();
-                                let finish_result = finish_result.clone();
-                                let reason = reason.clone();
-                                let payload = payload.clone();
-                                async move {
-                                    let _permit = semaphore.acquire().await.unwrap();
-                                    let output_callback = |reason: u16, payload: &[u8]| {
-                                        let mut result: Result<(u16, Vec<u8>), Error> =
-                                            Ok((reason, payload.to_vec()));
-                                        outputs_vector
-                                            .lock()
-                                            .unwrap()
-                                            .push(result.as_mut().unwrap().clone());
-                                        return result;
-                                    };
+                            let reason: Arc<Mutex<Option<advance_runner::YieldManualReason>>> =
+                                Arc::new(Mutex::new(None));
+                            let (sender, receiver) = bounded(1);
+                            let outputs_vector_arc_spawn = outputs_vector.clone();
+                            let reports_vector_arc_spawn = reports_vector.clone();
+                            let finish_result_arc_spawn = finish_result.clone();
+                            let payload_arc_spawn = payload.clone();
+                            let reason_arc_spawn = reason.clone();
 
-                                    let report_callback = |reason: u16, payload: &[u8]| {
-                                        let mut result: Result<(u16, Vec<u8>), Error> =
-                                            Ok((reason, payload.to_vec()));
-                                        reports_vector
-                                            .lock()
-                                            .unwrap()
-                                            .push(result.as_mut().unwrap().clone());
-                                        return result;
-                                    };
+                            pool.spawn_fifo(move || {
+                                let outputs_vector = outputs_vector_arc_spawn.clone();
+                                let reports_vector = reports_vector_arc_spawn.clone();
+                                let finish_result = finish_result_arc_spawn.clone();
+                                let reason = reason_arc_spawn.clone();
+                                let payload = payload_arc_spawn.clone();
+                                let output_callback = |reason: u16, payload: &[u8]| {
+                                    let mut result: Result<(u16, Vec<u8>), Error> =
+                                        Ok((reason, payload.to_vec()));
+                                    outputs_vector
+                                        .lock()
+                                        .unwrap()
+                                        .push(result.as_mut().unwrap().clone());
+                                    return result;
+                                };
 
-                                    let finish_callback = |reason: u16, payload: &[u8]| {
-                                        let mut result: Result<(u16, Vec<u8>), Error> =
-                                            Ok((reason, payload.to_vec()));
-                                        *finish_result.lock().unwrap() =
-                                            result.as_mut().unwrap().clone();
-                                        return result;
-                                    };
-                                    *reason.lock().unwrap() = Some(
-                                        run_advance(
-                                            machine_snapshot_path,
-                                            None,
-                                            payload.to_vec(),
-                                            HashMap::new(),
-                                            &mut Box::new(report_callback),
-                                            &mut Box::new(output_callback),
-                                            &mut Box::new(finish_callback),
-                                            HashMap::new(),
-                                            false,
-                                        )
-                                        .unwrap(),
-                                    );
-                                }
-                            })
-                            .await
-                            .unwrap();
+                                let report_callback = |reason: u16, payload: &[u8]| {
+                                    let mut result: Result<(u16, Vec<u8>), Error> =
+                                        Ok((reason, payload.to_vec()));
+                                    reports_vector
+                                        .lock()
+                                        .unwrap()
+                                        .push(result.as_mut().unwrap().clone());
+                                    return result;
+                                };
+                                let finish_callback = |reason: u16, payload: &[u8]| {
+                                    let mut result: Result<(u16, Vec<u8>), Error> =
+                                        Ok((reason, payload.to_vec()));
+                                    *finish_result.lock().unwrap() =
+                                        result.as_mut().unwrap().clone();
+                                    return result;
+                                };
+                                *reason.lock().unwrap() = Some(
+                                    run_advance(
+                                        machine_snapshot_path.clone(),
+                                        None,
+                                        payload.to_vec(),
+                                        HashMap::new(),
+                                        &mut Box::new(report_callback),
+                                        &mut Box::new(output_callback),
+                                        &mut Box::new(finish_callback),
+                                        HashMap::new(),
+                                        false,
+                                    )
+                                    .unwrap(),
+                                );
+                                sender.try_send(true).unwrap();
+                            });
+
+                            let _ = receiver.recv().await;
+
                             //generating proofs for each output
-
                             for output in &*outputs_vector.lock().unwrap() {
                                 let mut hasher = Keccak256::new();
                                 hasher.update(output.1.clone());

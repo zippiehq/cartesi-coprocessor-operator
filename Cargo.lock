@@ -20,7 +20,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 [[package]]
 name = "advance_runner"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/advance_runner?rev=e339fa348305262733acb84399817d1458595eff#e339fa348305262733acb84399817d1458595eff"
+source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=d56ca465282b258e6850fafb411926e90e9e7ff9#d56ca465282b258e6850fafb411926e90e9e7ff9"
 dependencies = [
  "alloy-primitives 0.7.7",
  "alloy-sol-types",
@@ -1129,6 +1129,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "cartesi-coprocessor-operator"
+version = "0.1.0"
+dependencies = [
+ "advance_runner",
+ "alloy-primitives 0.8.7",
+ "ark-serialize 0.4.2",
+ "async-std",
+ "cid 0.8.6",
+ "dotenv",
+ "eigen-crypto-bls",
+ "futures",
+ "hex",
+ "hyper 0.14.30",
+ "ipfs-api-backend-hyper",
+ "rayon",
+ "regex",
+ "rs-car-ipfs",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "cartesi-machine"
 version = "0.18.1"
 source = "git+https://github.com/cartesi/dave?rev=68a068b135a42c10e254a116e2930539f1c28727#68a068b135a42c10e254a116e2930539f1c28727"
@@ -1311,6 +1333,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "608697df725056feaccfa42cffdaeeec3fccc4ffc38358ecd19b243e716a78e0"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613f8cc01fe9cf1a3eb3d7f488fd2fa8388403e97039e2f73692932e291a770d"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -2369,28 +2410,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lambda_api"
-version = "0.1.0"
-dependencies = [
- "advance_runner",
- "alloy-primitives 0.8.7",
- "ark-serialize 0.4.2",
- "async-std",
- "cid 0.8.6",
- "dotenv",
- "eigen-crypto-bls",
- "futures",
- "hex",
- "hyper 0.14.30",
- "ipfs-api-backend-hyper",
- "regex",
- "rs-car-ipfs",
- "serde_json",
- "sha2",
- "tokio",
-]
-
-[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2837,16 +2856,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
 
 [[package]]
-name = "parking_lot"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1bf18183cf54e8d6059647fc3063646a1801cf30896933ec2311622cc4b9a27"
-dependencies = [
- "lock_api",
- "parking_lot_core",
-]
-
-[[package]]
 name = "parking_lot_core"
 version = "0.9.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3204,6 +3213,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "rayon"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b418a60154510ca1a002a752ca9714984e21e4241e804d32555251faf8b78ffa"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -3753,15 +3782,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9e9e0b4211b72e7b8b6e85c807d36c212bdb33ea8587f7569562a84df5465b1"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4025,9 +4045,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.52.0",
