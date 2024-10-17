@@ -15,11 +15,11 @@ use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::{collections::HashMap, convert::Infallible, io::Error, net::SocketAddr};
-use tokio::sync::Semaphore;
+use threadpool::ThreadPool;
 const HEIGHT: usize = 63;
-const MAX_THREADS_NUMBER: usize = 3;
 
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
@@ -32,14 +32,18 @@ use sha2::{Digest as Sha2Digest, Sha256};
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
-    let semaphore = Arc::new(Semaphore::new(MAX_THREADS_NUMBER));
+    let max_threads_number = std::env::var("MAX_THREADS_NUMBER")
+        .unwrap_or("3".to_string())
+        .parse::<usize>()
+        .unwrap();
+
+    let pool = Arc::new(ThreadPool::new(max_threads_number));
 
     let service = make_service_fn(|_| {
-        let semaphore = semaphore.clone();
-
+        let pool = pool.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
-                let semaphore = semaphore.clone();
+                let pool = pool.clone();
 
                 async move {
                     let path = req.uri().path().to_owned();
@@ -80,18 +84,27 @@ async fn main() {
                                 Arc::new(Mutex::new(Vec::new()));
                             let finish_result: Arc<Mutex<(u16, Vec<u8>)>> =
                                 Arc::new(Mutex::new((0, vec![0])));
-
-                            let reason = Arc::new(Mutex::new(None));
                             let machine_snapshot_path =
                                 format!("{}/{}", snapshot_dir, machine_hash);
-                            tokio::spawn({
+                            let reason: Arc<Mutex<Option<advance_runner::YieldManualReason>>> =
+                                Arc::new(Mutex::new(None));
+                            let condvar = Arc::new((Mutex::new(false), Condvar::new()));
+
+                            pool.execute({
                                 let outputs_vector = outputs_vector.clone();
                                 let reports_vector = reports_vector.clone();
                                 let finish_result = finish_result.clone();
                                 let reason = reason.clone();
                                 let payload = payload.clone();
-                                async move {
-                                    let _permit = semaphore.acquire().await.unwrap();
+                                let condvar = condvar.clone();
+                                move || {
+                                    let outputs_vector = outputs_vector.clone();
+                                    let reports_vector = reports_vector.clone();
+                                    let finish_result = finish_result.clone();
+                                    let reason = reason.clone();
+                                    let payload = payload.clone();
+                                    let condvar = condvar.clone();
+
                                     let output_callback = |reason: u16, payload: &[u8]| {
                                         let mut result: Result<(u16, Vec<u8>), Error> =
                                             Ok((reason, payload.to_vec()));
@@ -121,7 +134,7 @@ async fn main() {
                                     };
                                     *reason.lock().unwrap() = Some(
                                         run_advance(
-                                            machine_snapshot_path,
+                                            machine_snapshot_path.clone(),
                                             None,
                                             payload.to_vec(),
                                             HashMap::new(),
@@ -133,10 +146,17 @@ async fn main() {
                                         )
                                         .unwrap(),
                                     );
+                                    let (is_finished, cvar) = &*condvar;
+                                    *is_finished.lock().unwrap() = true;
+                                    cvar.notify_one();
                                 }
-                            })
-                            .await
-                            .unwrap();
+                            });
+
+                            let (is_finished, cvar) = &*condvar;
+
+                            while !*is_finished.lock().unwrap() {
+                                cvar.wait(is_finished.lock().unwrap()).unwrap();
+                            }
                             //generating proofs for each output
 
                             for output in &*outputs_vector.lock().unwrap() {
