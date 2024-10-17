@@ -11,13 +11,14 @@ use hyper::{Body, Client, Request, Response, Server, StatusCode};
 use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
+use std::collections::VecDeque;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::{collections::HashMap, convert::Infallible, io::Error, net::SocketAddr};
-use tokio::sync::Semaphore;
+use std::{sync::Condvar, thread};
 const HEIGHT: usize = 63;
 const MAX_THREADS_NUMBER: usize = 3;
 
@@ -32,14 +33,17 @@ use sha2::{Digest as Sha2Digest, Sha256};
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
-    let semaphore = Arc::new(Semaphore::new(MAX_THREADS_NUMBER));
+    let threads_queue = Arc::new(Mutex::new(VecDeque::new()));
+    let active_threads_condvar = Arc::new((Mutex::new(0), Condvar::new()));
 
     let service = make_service_fn(|_| {
-        let semaphore = semaphore.clone();
+        let threads_queue = threads_queue.clone();
+        let active_threads_condvar = active_threads_condvar.clone();
 
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
-                let semaphore = semaphore.clone();
+                let threads_queue = threads_queue.clone();
+                let active_threads_condvar = active_threads_condvar.clone();
 
                 async move {
                     let path = req.uri().path().to_owned();
@@ -80,18 +84,23 @@ async fn main() {
                                 Arc::new(Mutex::new(Vec::new()));
                             let finish_result: Arc<Mutex<(u16, Vec<u8>)>> =
                                 Arc::new(Mutex::new((0, vec![0])));
-
-                            let reason = Arc::new(Mutex::new(None));
                             let machine_snapshot_path =
                                 format!("{}/{}", snapshot_dir, machine_hash);
-                            tokio::spawn({
+                            let reason: Arc<Mutex<Option<advance_runner::YieldManualReason>>> =
+                                Arc::new(Mutex::new(None));
+                            threads_queue.lock().unwrap().push_back(Box::new({
                                 let outputs_vector = outputs_vector.clone();
                                 let reports_vector = reports_vector.clone();
                                 let finish_result = finish_result.clone();
                                 let reason = reason.clone();
                                 let payload = payload.clone();
-                                async move {
-                                    let _permit = semaphore.acquire().await.unwrap();
+                                move || {
+                                    let outputs_vector = outputs_vector.clone();
+                                    let reports_vector = reports_vector.clone();
+                                    let finish_result = finish_result.clone();
+                                    let reason = reason.clone();
+                                    let payload = payload.clone();
+
                                     let output_callback = |reason: u16, payload: &[u8]| {
                                         let mut result: Result<(u16, Vec<u8>), Error> =
                                             Ok((reason, payload.to_vec()));
@@ -121,7 +130,7 @@ async fn main() {
                                     };
                                     *reason.lock().unwrap() = Some(
                                         run_advance(
-                                            machine_snapshot_path,
+                                            machine_snapshot_path.clone(),
                                             None,
                                             payload.to_vec(),
                                             HashMap::new(),
@@ -134,9 +143,30 @@ async fn main() {
                                         .unwrap(),
                                     );
                                 }
-                            })
-                            .await
-                            .unwrap();
+                            }));
+
+                            let (active_threads, cvar) = &*active_threads_condvar.clone();
+
+                            while *active_threads.lock().unwrap() >= MAX_THREADS_NUMBER {
+                                let active_threads = active_threads.lock().unwrap();
+                                cvar.wait(active_threads).unwrap();
+                            }
+                            let mut queued_task = threads_queue.lock().unwrap().pop_front();
+                            if let Some(run_advance_task) = queued_task {
+                                *active_threads.lock().unwrap() += 1;
+
+                                let cvar_clone = Arc::clone(&active_threads_condvar);
+
+                                let _ = thread::spawn(move || {
+                                    run_advance_task();
+                                    let (active_threads, cvar) = &*cvar_clone;
+                                    let mut active_threads = active_threads.lock().unwrap();
+                                    *active_threads -= 1;
+                                    cvar.notify_one();
+                                })
+                                .join();
+                            }
+
                             //generating proofs for each output
 
                             for output in &*outputs_vector.lock().unwrap() {

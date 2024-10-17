@@ -20,7 +20,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 [[package]]
 name = "advance_runner"
 version = "0.1.0"
-source = "git+https://github.com/dymchenkko/advance_runner?rev=e339fa348305262733acb84399817d1458595eff#e339fa348305262733acb84399817d1458595eff"
+source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=d56ca465282b258e6850fafb411926e90e9e7ff9#d56ca465282b258e6850fafb411926e90e9e7ff9"
 dependencies = [
  "alloy-primitives 0.7.7",
  "alloy-sol-types",
@@ -1126,6 +1126,28 @@ dependencies = [
  "libc",
  "once_cell",
  "serde",
+]
+
+[[package]]
+name = "cartesi-coprocessor-operator"
+version = "0.1.0"
+dependencies = [
+ "advance_runner",
+ "alloy-primitives 0.8.7",
+ "ark-serialize 0.4.2",
+ "async-std",
+ "cid 0.8.6",
+ "dotenv",
+ "eigen-crypto-bls",
+ "futures",
+ "hex",
+ "hyper 0.14.30",
+ "ipfs-api-backend-hyper",
+ "regex",
+ "rs-car-ipfs",
+ "serde_json",
+ "sha2",
+ "tokio",
 ]
 
 [[package]]
@@ -2366,28 +2388,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de8b303297635ad57c9f5059fd9cee7a47f8e8daa09df0fcd07dd39fb22977f"
 dependencies = [
  "log",
-]
-
-[[package]]
-name = "lambda_api"
-version = "0.1.0"
-dependencies = [
- "advance_runner",
- "alloy-primitives 0.8.7",
- "ark-serialize 0.4.2",
- "async-std",
- "cid 0.8.6",
- "dotenv",
- "eigen-crypto-bls",
- "futures",
- "hex",
- "hyper 0.14.30",
- "ipfs-api-backend-hyper",
- "regex",
- "rs-car-ipfs",
- "serde_json",
- "sha2",
- "tokio",
 ]
 
 [[package]]
