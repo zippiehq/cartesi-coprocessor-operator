@@ -6,7 +6,8 @@ WORKDIR /lambda-api
 COPY /src /lambda-api/src
 COPY /Cargo.toml /lambda-api/Cargo.toml
 WORKDIR /lambda-api
-RUN cargo build --release
+RUN git config --global url."https://github.com/".insteadOf git@github.com:
+RUN CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --features bls_signing
 
 FROM debian:bookworm
 RUN apt-get update && apt-get install -y libssl3 ca-certificates

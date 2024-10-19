@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-std = { version = "1", features = ["attributes", "tokio1"] }
-advance_runner = {git = "https://github.com/dymchenkko/advance_runner", rev = "e339fa348305262733acb84399817d1458595eff"}
+advance_runner = {git = "https://github.com/zippiehq/cartesi-advance-runner", rev = "d56ca465282b258e6850fafb411926e90e9e7ff9"}
 hyper = { version = "0.14", features = ["full"] }
 tokio = { version = "1", features = ["full"] }
 hex = "0.4"
