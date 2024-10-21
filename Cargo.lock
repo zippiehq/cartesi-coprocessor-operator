@@ -21,6 +21,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 name = "advance_runner"
 version = "0.1.0"
 source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=d56ca465282b258e6850fafb411926e90e9e7ff9#d56ca465282b258e6850fafb411926e90e9e7ff9"
+source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=d56ca465282b258e6850fafb411926e90e9e7ff9#d56ca465282b258e6850fafb411926e90e9e7ff9"
 dependencies = [
  "alloy-primitives 0.7.7",
  "alloy-sol-types",
@@ -1147,6 +1148,7 @@ dependencies = [
  "rs-car-ipfs",
  "serde_json",
  "sha2",
+ "threadpool",
  "tokio",
 ]
 

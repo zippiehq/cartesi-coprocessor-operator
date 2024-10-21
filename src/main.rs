@@ -16,13 +16,12 @@ use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Condvar;
 use std::sync::Mutex;
 use async_std::task;
 use std::{collections::HashMap, convert::Infallible, io::Error, net::SocketAddr};
-use std::{sync::Condvar, thread};
-use async_std::task;
+use threadpool::ThreadPool;
 const HEIGHT: usize = 63;
-const MAX_THREADS_NUMBER: usize = 3;
 
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
@@ -35,17 +34,18 @@ use sha2::{Digest as Sha2Digest, Sha256};
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
-    let threads_queue = Arc::new(Mutex::new(VecDeque::new()));
-    let active_threads_condvar = Arc::new((Mutex::new(0), Condvar::new()));
+    let max_threads_number = std::env::var("MAX_THREADS_NUMBER")
+        .unwrap_or("3".to_string())
+        .parse::<usize>()
+        .unwrap();
+
+    let pool = Arc::new(ThreadPool::new(max_threads_number));
 
     let service = make_service_fn(|_| {
-        let threads_queue = threads_queue.clone();
-        let active_threads_condvar = active_threads_condvar.clone();
-
+        let pool = pool.clone();
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
-                let threads_queue = threads_queue.clone();
-                let active_threads_condvar = active_threads_condvar.clone();
+                let pool = pool.clone();
 
                 async move {
                     let path = req.uri().path().to_owned();
@@ -90,18 +90,22 @@ async fn main() {
                                 format!("{}/{}", snapshot_dir, machine_hash);
                             let reason: Arc<Mutex<Option<advance_runner::YieldManualReason>>> =
                                 Arc::new(Mutex::new(None));
-                            threads_queue.lock().unwrap().push_back(Box::new({
+                            let condvar = Arc::new((Mutex::new(false), Condvar::new()));
+
+                            pool.execute({
                                 let outputs_vector = outputs_vector.clone();
                                 let reports_vector = reports_vector.clone();
                                 let finish_result = finish_result.clone();
                                 let reason = reason.clone();
                                 let payload = payload.clone();
+                                let condvar = condvar.clone();
                                 move || {
                                     let outputs_vector = outputs_vector.clone();
                                     let reports_vector = reports_vector.clone();
                                     let finish_result = finish_result.clone();
                                     let reason = reason.clone();
                                     let payload = payload.clone();
+                                    let condvar = condvar.clone();
 
                                     let output_callback = |reason: u16, payload: &[u8]| {
                                         let mut result: Result<(u16, Vec<u8>), Error> =
@@ -133,6 +137,7 @@ async fn main() {
                                     *reason.lock().unwrap() = Some(
                                         run_advance(
                                             machine_snapshot_path.clone(),
+                                            machine_snapshot_path.clone(),
                                             None,
                                             payload.to_vec(),
                                             HashMap::new(),
@@ -144,31 +149,17 @@ async fn main() {
                                         )
                                         .unwrap(),
                                     );
-                                }
-                            }));
-
-                            let (active_threads, cvar) = &*active_threads_condvar.clone();
-
-                            while *active_threads.lock().unwrap() >= MAX_THREADS_NUMBER {
-                                let active_threads = active_threads.lock().unwrap();
-                                cvar.wait(active_threads).unwrap();
-                            }
-                            let mut queued_task = threads_queue.lock().unwrap().pop_front();
-                            if let Some(run_advance_task) = queued_task {
-                                *active_threads.lock().unwrap() += 1;
-
-                                let cvar_clone = Arc::clone(&active_threads_condvar);
-
-                                let _ = thread::spawn(move || {
-                                    run_advance_task();
-                                    let (active_threads, cvar) = &*cvar_clone;
-                                    let mut active_threads = active_threads.lock().unwrap();
-                                    *active_threads -= 1;
+                                    let (is_finished, cvar) = &*condvar;
+                                    *is_finished.lock().unwrap() = true;
                                     cvar.notify_one();
-                                })
-                                .join();
-                            }
+                                }
+                            });
 
+                            let (is_finished, cvar) = &*condvar;
+
+                            while !*is_finished.lock().unwrap() {
+                                cvar.wait(is_finished.lock().unwrap()).unwrap();
+                            }
                             //generating proofs for each output
 
                             for output in &*outputs_vector.lock().unwrap() {
