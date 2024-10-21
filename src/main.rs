@@ -137,7 +137,6 @@ async fn main() {
                                     *reason.lock().unwrap() = Some(
                                         run_advance(
                                             machine_snapshot_path.clone(),
-                                            machine_snapshot_path.clone(),
                                             None,
                                             payload.to_vec(),
                                             HashMap::new(),
