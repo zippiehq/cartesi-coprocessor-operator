@@ -20,6 +20,7 @@ use std::sync::Mutex;
 use async_std::task;
 use std::{collections::HashMap, convert::Infallible, io::Error, net::SocketAddr};
 use std::{sync::Condvar, thread};
+use async_std::task;
 const HEIGHT: usize = 63;
 const MAX_THREADS_NUMBER: usize = 3;
 
@@ -304,156 +305,181 @@ async fn main() {
                                         .body(Body::from(json_response))
                                         .unwrap();
 
-                            return Ok::<_, Infallible>(response);
-                        }
-                    } else {
-                        match StdOpenOptions::new()
-                            .read(true)
-                            .write(true)
-                            .create_new(true)
-                            .open(&lock_file_path)
-                        {
-                            Ok(_) => {
-                                // Clone variables for use inside the async block
-                                let lock_file_path_clone = lock_file_path.clone();
-                                let machine_dir_clone = machine_dir.clone();
-                                let cid_str_clone = cid_str.to_string();
-                                let machine_hash_clone = machine_hash.to_string();
-                                let expected_size_clone = expected_size;
-                                let snapshot_dir_clone = snapshot_dir.clone();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            } else {
+                                match StdOpenOptions::new()
+                                    .read(true)
+                                    .write(true)
+                                    .create_new(true)
+                                    .open(&lock_file_path)
+                                {
+                                    Ok(_) => {
+                                        // Clone variables for use inside the async block
+                                        let lock_file_path_clone = lock_file_path.clone();
+                                        let machine_dir_clone = machine_dir.clone();
+                                        let cid_str_clone = cid_str.to_string();
+                                        let machine_hash_clone = machine_hash.to_string();
+                                        let expected_size_clone = expected_size;
+                                        let snapshot_dir_clone = snapshot_dir.clone();
 
-                                // Spawn the background task
-                                task::spawn(async move {
-                                    let directory_cid = match cid_str_clone.parse::<Cid>() {
-                                        Ok(cid) => cid,
-                                        Err(_) => {
-                                            let _ = std::fs::remove_file(&lock_file_path_clone);
-                                            eprintln!("Invalid CID");
-                                            return;
-                                        }
-                                    };
+                                        // Spawn the background task
+                                        task::spawn(async move {
+                                            let directory_cid = match cid_str_clone.parse::<Cid>() {
+                                                Ok(cid) => cid,
+                                                Err(_) => {
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!("Invalid CID");
+                                                    return;
+                                                }
+                                            };
 
-                                    let ipfs_url = std::env::var("IPFS_URL")
-                                        .unwrap_or_else(|_| "http://127.0.0.1:5001".to_string());
+                                            let ipfs_url = std::env::var("IPFS_URL")
+                                                .unwrap_or_else(|_| {
+                                                    "http://127.0.0.1:5001".to_string()
+                                                });
 
+                                            let stat_uri = format!(
+                                                "{}/api/v0/dag/stat?arg={}",
+                                                ipfs_url, cid_str_clone
+                                            );
 
-                                    let stat_uri = format!(
-                                        "{}/api/v0/dag/stat?arg={}",
-                                        ipfs_url, cid_str_clone
-                                    );
+                                            let stat_req = Request::builder()
+                                                .method("POST")
+                                                .uri(stat_uri)
+                                                .body(Body::empty())
+                                                .unwrap();
 
-                                    let stat_req = Request::builder()
-                                        .method("POST")
-                                        .uri(stat_uri)
-                                        .body(Body::empty())
-                                        .unwrap();
+                                            let client = Client::new();
 
-                                    let client = Client::new();
+                                            let stat_res = match client.request(stat_req).await {
+                                                Ok(res) => res,
+                                                Err(err) => {
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!("Failed to get DAG stat: {}", err);
+                                                    return;
+                                                }
+                                            };
 
-                                    let stat_res = match client.request(stat_req).await {
-                                        Ok(res) => res,
-                                        Err(err) => {
-                                            let _ = std::fs::remove_file(&lock_file_path_clone);
-                                            eprintln!("Failed to get DAG stat: {}", err);
-                                            return;
-                                        }
-                                    };
+                                            let stat_body_bytes =
+                                                match hyper::body::to_bytes(stat_res.into_body())
+                                                    .await
+                                                {
+                                                    Ok(bytes) => bytes,
+                                                    Err(err) => {
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
+                                                            "Failed to read DAG stat response: {}",
+                                                            err
+                                                        );
+                                                        return;
+                                                    }
+                                                };
 
-                                    let stat_body_bytes =
-                                        match hyper::body::to_bytes(stat_res.into_body()).await {
-                                            Ok(bytes) => bytes,
-                                            Err(err) => {
+                                            let stat_json: serde_json::Value =
+                                                match serde_json::from_slice(&stat_body_bytes) {
+                                                    Ok(json) => json,
+                                                    Err(err) => {
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
+                                                            "Failed to parse DAG stat response: {}",
+                                                            err
+                                                        );
+                                                        return;
+                                                    }
+                                                };
+
+                                            let actual_size = match stat_json["Size"].as_u64() {
+                                                Some(size) => size,
+                                                None => {
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!(
+                                                        "Failed to get Size from DAG stat response"
+                                                    );
+                                                    return;
+                                                }
+                                            };
+
+                                            if actual_size != expected_size_clone {
                                                 let _ = std::fs::remove_file(&lock_file_path_clone);
                                                 eprintln!(
-                                                    "Failed to read DAG stat response: {}",
-                                                    err
+                                                    "Size mismatch: expected {}, got {}",
+                                                    expected_size_clone, actual_size
                                                 );
                                                 return;
                                             }
-                                        };
 
-                                    let stat_json: serde_json::Value =
-                                        match serde_json::from_slice(&stat_body_bytes) {
-                                            Ok(json) => json,
-                                            Err(err) => {
-                                                let _ = std::fs::remove_file(&lock_file_path_clone);
-                                                eprintln!(
-                                                    "Failed to parse DAG stat response: {}",
-                                                    err
-                                                );
-                                                return;
-                                            }
-                                        };
-
-                                    let actual_size = match stat_json["Size"].as_u64() {
-                                        Some(size) => size,
-                                        None => {
-                                            let _ = std::fs::remove_file(&lock_file_path_clone);
-                                            eprintln!("Failed to get Size from DAG stat response");
-                                            return;
-                                        }
-                                    };
-
-                                    if actual_size != expected_size_clone {
-                                        let _ = std::fs::remove_file(&lock_file_path_clone);
-                                        eprintln!(
-                                            "Size mismatch: expected {}, got {}",
-                                            expected_size_clone, actual_size
-                                        );
-                                        return;
-                                    }
-
-                                    if let Err(err) = dedup_download_directory(
-                                        &ipfs_url,
-                                        directory_cid,
-                                        machine_dir_clone.clone(),
-                                    )
-                                    .await
-                                    {
-                                        let _ = std::fs::remove_dir_all(&machine_dir_clone);
-                                        let _ = std::fs::remove_file(&lock_file_path_clone);
-                                        eprintln!("Failed to download directory: {}", err);
-                                        return;
-                                    }
-
-                                    let hash_path = format!("{}/hash", machine_dir_clone);
-
-                                    let expected_hash_bytes =
-                                        match async_std::fs::read(&hash_path).await {
-                                            Ok(bytes) => bytes,
-                                            Err(err) => {
+                                            if let Err(err) = dedup_download_directory(
+                                                &ipfs_url,
+                                                directory_cid,
+                                                machine_dir_clone.clone(),
+                                            )
+                                            .await
+                                            {
                                                 let _ = std::fs::remove_dir_all(&machine_dir_clone);
                                                 let _ = std::fs::remove_file(&lock_file_path_clone);
-                                                eprintln!("Failed to read hash file: {}", err);
+                                                eprintln!("Failed to download directory: {}", err);
                                                 return;
                                             }
-                                        };
 
-                                    let machine_hash_bytes = match hex::decode(machine_hash_clone) {
-                                        Ok(bytes) => bytes,
-                                        Err(_) => {
-                                            let _ = std::fs::remove_dir_all(&machine_dir_clone);
+                                            let hash_path = format!("{}/hash", machine_dir_clone);
+
+                                            let expected_hash_bytes =
+                                                match async_std::fs::read(&hash_path).await {
+                                                    Ok(bytes) => bytes,
+                                                    Err(err) => {
+                                                        let _ = std::fs::remove_dir_all(
+                                                            &machine_dir_clone,
+                                                        );
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
+                                                            "Failed to read hash file: {}",
+                                                            err
+                                                        );
+                                                        return;
+                                                    }
+                                                };
+
+                                            let machine_hash_bytes = match hex::decode(
+                                                machine_hash_clone,
+                                            ) {
+                                                Ok(bytes) => bytes,
+                                                Err(_) => {
+                                                    let _ =
+                                                        std::fs::remove_dir_all(&machine_dir_clone);
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!(
+                                                        "Invalid machine_hash: must be valid hex"
+                                                    );
+                                                    return;
+                                                }
+                                            };
+
+                                            if expected_hash_bytes != machine_hash_bytes {
+                                                let _ = std::fs::remove_dir_all(&machine_dir_clone);
+                                                let _ = std::fs::remove_file(&lock_file_path_clone);
+                                                eprintln!("Expected hash from /hash file does not match machine_hash");
+                                                return;
+                                            }
                                             let _ = std::fs::remove_file(&lock_file_path_clone);
-                                            eprintln!("Invalid machine_hash: must be valid hex");
-                                            return;
-                                        }
-                                    };
+                                            println!("Download completed successfully");
+                                        });
 
-                                    if expected_hash_bytes != machine_hash_bytes {
-                                        let _ = std::fs::remove_dir_all(&machine_dir_clone);
-                                        let _ = std::fs::remove_file(&lock_file_path_clone);
-                                        eprintln!("Expected hash from /hash file does not match machine_hash");
-                                        return;
-                                    }
-
-                                    let _ = std::fs::remove_file(&lock_file_path_clone);
-                                    println!("Download completed successfully");
-                                });
-
-                                let json_response = serde_json::json!({
-                                    "state": "started_download",
-                                });
-                                let json_response = serde_json::to_string(&json_response).unwrap();
+                                        let json_response = serde_json::json!({
+                                            "state": "started_downloaded",
+                                        });
+                                        let json_response =
+                                            serde_json::to_string(&json_response).unwrap();
 
                                         let response = Response::builder()
                                             .status(StatusCode::OK)
