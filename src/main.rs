@@ -25,11 +25,9 @@ const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
 #[cfg(feature = "bls_signing")]
-use ark_serialize::CanonicalSerialize;
-#[cfg(feature = "bls_signing")]
-use eigen_crypto_bls::BlsKeyPair;
-#[cfg(feature = "bls_signing")]
 use sha2::{Digest as Sha2Digest, Sha256};
+#[cfg(feature = "bls_signing")]
+use signer_eigen::SignerEigen;
 #[async_std::main]
 async fn main() {
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
@@ -187,9 +185,7 @@ async fn main() {
                             if signing_requested {
                                 let bls_private_key_str = std::env::var("BLS_PRIVATE_KEY")
                                     .expect("BLS_PRIVATE_KEY not set");
-                                let bls_key_pair = BlsKeyPair::new(bls_private_key_str)
-                                    .expect("Invalid BLS private key");
-
+                                let eigen_signer = SignerEigen::new(bls_private_key_str);
                                 let mut buffer = vec![0u8; 12];
                                 buffer.extend_from_slice(&ruleset_bytes);
 
@@ -207,15 +203,8 @@ async fn main() {
 
                                 let sha256_hash = Sha256::digest(&buffer);
 
-                                let signature = bls_key_pair.sign_message(&sha256_hash);
+                                let signature_hex = eigen_signer.sign(&sha256_hash);
 
-                                let mut signature_bytes = Vec::new();
-                                signature
-                                    .g1_point()
-                                    .g1()
-                                    .serialize_uncompressed(&mut signature_bytes)
-                                    .unwrap();
-                                let signature_hex = hex::encode(&signature_bytes);
                                 if *reason.lock().unwrap() == Some(YieldManualReason::Accepted) {
                                     json_response["finish_callback"] =
                                         serde_json::json!(*finish_result);
@@ -434,21 +423,22 @@ async fn main() {
                                                     }
                                                 };
 
-                                            let machine_hash_bytes = match hex::decode(
-                                                machine_hash_clone,
-                                            ) {
-                                                Ok(bytes) => bytes,
-                                                Err(_) => {
-                                                    let _ =
-                                                        std::fs::remove_dir_all(&machine_dir_clone);
-                                                    let _ =
-                                                        std::fs::remove_file(&lock_file_path_clone);
-                                                    eprintln!(
+                                            let machine_hash_bytes =
+                                                match hex::decode(machine_hash_clone) {
+                                                    Ok(bytes) => bytes,
+                                                    Err(_) => {
+                                                        let _ = std::fs::remove_dir_all(
+                                                            &machine_dir_clone,
+                                                        );
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
                                                         "Invalid machine_hash: must be valid hex"
                                                     );
-                                                    return;
-                                                }
-                                            };
+                                                        return;
+                                                    }
+                                                };
 
                                             if expected_hash_bytes != machine_hash_bytes {
                                                 let _ = std::fs::remove_dir_all(&machine_dir_clone);
