@@ -300,203 +300,169 @@ async fn main() {
                                     .open(&lock_file_path)
                                 {
                                     Ok(_) => {
-                                        let directory_cid = match cid_str.parse::<Cid>() {
-                                            Ok(cid) => cid,
-                                            Err(_) => {
-                                                let _ = std::fs::remove_file(&lock_file_path);
+                                        // Clone variables for use inside the async block
+                                        let lock_file_path_clone = lock_file_path.clone();
+                                        let machine_dir_clone = machine_dir.clone();
+                                        let cid_str_clone = cid_str.to_string();
+                                        let machine_hash_clone = machine_hash.to_string();
+                                        let expected_size_clone = expected_size;
+                                        let snapshot_dir_clone = snapshot_dir.clone();
 
-                                                let json_error = serde_json::json!({
-                                                    "error": "Invalid CID",
-                                                });
-                                                let json_error =
-                                                    serde_json::to_string(&json_error).unwrap();
-                                                let response = Response::builder()
-                                                    .status(StatusCode::BAD_REQUEST)
-                                                    .body(Body::from(json_error))
-                                                    .unwrap();
-
-                                                return Ok::<_, Infallible>(response);
-                                            }
-                                        };
-
-                                        let ipfs_url = std::env::var("IPFS_URL")
-                                            .unwrap_or("http://127.0.0.1:5001".to_string());
-
-                                        let stat_uri =
-                                            format!("{}/api/v0/dag/stat?arg={}", ipfs_url, cid_str);
-
-                                        let stat_req = Request::builder()
-                                            .method("POST")
-                                            .uri(stat_uri)
-                                            .body(Body::empty())
-                                            .unwrap();
-
-                                        let client = Client::new();
-
-                                        let stat_res = match client.request(stat_req).await {
-                                            Ok(res) => res,
-                                            Err(err) => {
-                                                let _ = std::fs::remove_file(&lock_file_path);
-
-                                                let json_error = serde_json::json!({
-                                                    "error": format!("Failed to get DAG stat: {}", err),
-                                                });
-                                                let json_error =
-                                                    serde_json::to_string(&json_error).unwrap();
-                                                let response = Response::builder()
-                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                    .body(Body::from(json_error))
-                                                    .unwrap();
-
-                                                return Ok::<_, Infallible>(response);
-                                            }
-                                        };
-
-                                        let stat_body_bytes =
-                                            hyper::body::to_bytes(stat_res.into_body())
-                                                .await
-                                                .unwrap();
-
-                                        let stat_json: serde_json::Value =
-                                            match serde_json::from_slice(&stat_body_bytes) {
-                                                Ok(json) => json,
-                                                Err(err) => {
-                                                    let _ = std::fs::remove_file(&lock_file_path);
-
-                                                    let json_error = serde_json::json!({
-                                                        "error": format!("Failed to parse DAG stat response: {}", err),
-                                                    });
-                                                    let json_error =
-                                                        serde_json::to_string(&json_error).unwrap();
-                                                    let response = Response::builder()
-                                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                        .body(Body::from(json_error))
-                                                        .unwrap();
-
-                                                    return Ok::<_, Infallible>(response);
+                                        // Spawn the background task
+                                        task::spawn(async move {
+                                            let directory_cid = match cid_str_clone.parse::<Cid>() {
+                                                Ok(cid) => cid,
+                                                Err(_) => {
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!("Invalid CID");
+                                                    return;
                                                 }
                                             };
-                                        let actual_size = match stat_json["Size"].as_u64() {
-                                            Some(size) => size,
-                                            None => {
-                                                let _ = std::fs::remove_file(&lock_file_path);
 
-                                                let json_error = serde_json::json!({
-                                                    "error": "Failed to get Size from DAG stat response",
+                                            let ipfs_url = std::env::var("IPFS_URL")
+                                                .unwrap_or_else(|_| {
+                                                    "http://127.0.0.1:5001".to_string()
                                                 });
-                                                let json_error =
-                                                    serde_json::to_string(&json_error).unwrap();
-                                                let response = Response::builder()
-                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                    .body(Body::from(json_error))
-                                                    .unwrap();
 
-                                                return Ok::<_, Infallible>(response);
-                                            }
-                                        };
+                                            let stat_uri = format!(
+                                                "{}/api/v0/dag/stat?arg={}",
+                                                ipfs_url, cid_str_clone
+                                            );
 
-                                        if actual_size != expected_size {
-                                            let _ = std::fs::remove_file(&lock_file_path);
-
-                                            let json_error = serde_json::json!({
-                                                "error": format!("Size mismatch: expected {}, got {}", expected_size, actual_size),
-                                            });
-                                            let json_error =
-                                                serde_json::to_string(&json_error).unwrap();
-                                            let response = Response::builder()
-                                                .status(StatusCode::BAD_REQUEST)
-                                                .body(Body::from(json_error))
+                                            let stat_req = Request::builder()
+                                                .method("POST")
+                                                .uri(stat_uri)
+                                                .body(Body::empty())
                                                 .unwrap();
 
-                                            return Ok::<_, Infallible>(response);
-                                        }
+                                            let client = Client::new();
 
-                                        if let Err(err) = dedup_download_directory(
-                                            &ipfs_url,
-                                            directory_cid,
-                                            machine_dir.clone(),
-                                        )
-                                        .await
-                                        {
-                                            let _ = std::fs::remove_dir_all(&machine_dir);
-                                            let _ = std::fs::remove_file(&lock_file_path);
-                                            let json_error = serde_json::json!({
-                                                "error": format!("Failed to download directory: {}", err),
-                                            });
-                                            let json_error =
-                                                serde_json::to_string(&json_error).unwrap();
-                                            let response = Response::builder()
-                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(Body::from(json_error))
-                                                .unwrap();
+                                            let stat_res = match client.request(stat_req).await {
+                                                Ok(res) => res,
+                                                Err(err) => {
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!("Failed to get DAG stat: {}", err);
+                                                    return;
+                                                }
+                                            };
 
-                                            return Ok::<_, Infallible>(response);
-                                        }
+                                            let stat_body_bytes =
+                                                match hyper::body::to_bytes(stat_res.into_body())
+                                                    .await
+                                                {
+                                                    Ok(bytes) => bytes,
+                                                    Err(err) => {
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
+                                                            "Failed to read DAG stat response: {}",
+                                                            err
+                                                        );
+                                                        return;
+                                                    }
+                                                };
 
-                                        let hash_path = format!("{}/hash", machine_dir);
+                                            let stat_json: serde_json::Value =
+                                                match serde_json::from_slice(&stat_body_bytes) {
+                                                    Ok(json) => json,
+                                                    Err(err) => {
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
+                                                            "Failed to parse DAG stat response: {}",
+                                                            err
+                                                        );
+                                                        return;
+                                                    }
+                                                };
 
-                                        let expected_hash_bytes = match async_std::fs::read(
-                                            &hash_path,
-                                        )
-                                        .await
-                                        {
-                                            Ok(bytes) => bytes,
-                                            Err(err) => {
-                                                let _ = std::fs::remove_dir_all(&machine_dir);
-                                                let _ = std::fs::remove_file(&lock_file_path);
-                                                let json_error = serde_json::json!({
-                                                    "error": format!("Failed to read hash file: {}", err),
-                                                });
-                                                let json_error =
-                                                    serde_json::to_string(&json_error).unwrap();
-                                                let response = Response::builder()
-                                                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                    .body(Body::from(json_error))
-                                                    .unwrap();
+                                            let actual_size = match stat_json["Size"].as_u64() {
+                                                Some(size) => size,
+                                                None => {
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!(
+                                                        "Failed to get Size from DAG stat response"
+                                                    );
+                                                    return;
+                                                }
+                                            };
 
-                                                return Ok::<_, Infallible>(response);
+                                            if actual_size != expected_size_clone {
+                                                let _ = std::fs::remove_file(&lock_file_path_clone);
+                                                eprintln!(
+                                                    "Size mismatch: expected {}, got {}",
+                                                    expected_size_clone, actual_size
+                                                );
+                                                return;
                                             }
-                                        };
 
-                                        let machine_hash_bytes = match hex::decode(machine_hash) {
-                                            Ok(bytes) => bytes,
-                                            Err(_) => {
-                                                let _ = std::fs::remove_dir_all(&machine_dir);
-                                                let _ = std::fs::remove_file(&lock_file_path);
-                                                let json_error = serde_json::json!({
-                                                    "error": "Invalid machine_hash: must be valid hex",
-                                                });
-                                                let json_error =
-                                                    serde_json::to_string(&json_error).unwrap();
-                                                let response = Response::builder()
-                                                    .status(StatusCode::BAD_REQUEST)
-                                                    .body(Body::from(json_error))
-                                                    .unwrap();
-
-                                                return Ok::<_, Infallible>(response);
+                                            if let Err(err) = dedup_download_directory(
+                                                &ipfs_url,
+                                                directory_cid,
+                                                machine_dir_clone.clone(),
+                                            )
+                                            .await
+                                            {
+                                                let _ = std::fs::remove_dir_all(&machine_dir_clone);
+                                                let _ = std::fs::remove_file(&lock_file_path_clone);
+                                                eprintln!("Failed to download directory: {}", err);
+                                                return;
                                             }
-                                        };
 
-                                        if expected_hash_bytes != machine_hash_bytes {
-                                            let _ = std::fs::remove_dir_all(&machine_dir);
-                                            let _ = std::fs::remove_file(&lock_file_path);
-                                            let json_error = serde_json::json!({
-                                                "error": "Expected hash from /hash file does not match machine_hash",
-                                            });
-                                            let json_error =
-                                                serde_json::to_string(&json_error).unwrap();
-                                            let response = Response::builder()
-                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(Body::from(json_error))
-                                                .unwrap();
+                                            let hash_path = format!("{}/hash", machine_dir_clone);
 
-                                            return Ok::<_, Infallible>(response);
-                                        }
+                                            let expected_hash_bytes =
+                                                match async_std::fs::read(&hash_path).await {
+                                                    Ok(bytes) => bytes,
+                                                    Err(err) => {
+                                                        let _ = std::fs::remove_dir_all(
+                                                            &machine_dir_clone,
+                                                        );
+                                                        let _ = std::fs::remove_file(
+                                                            &lock_file_path_clone,
+                                                        );
+                                                        eprintln!(
+                                                            "Failed to read hash file: {}",
+                                                            err
+                                                        );
+                                                        return;
+                                                    }
+                                                };
 
-                                        let _ = std::fs::remove_file(&lock_file_path);
+                                            let machine_hash_bytes = match hex::decode(
+                                                machine_hash_clone,
+                                            ) {
+                                                Ok(bytes) => bytes,
+                                                Err(_) => {
+                                                    let _ =
+                                                        std::fs::remove_dir_all(&machine_dir_clone);
+                                                    let _ =
+                                                        std::fs::remove_file(&lock_file_path_clone);
+                                                    eprintln!(
+                                                        "Invalid machine_hash: must be valid hex"
+                                                    );
+                                                    return;
+                                                }
+                                            };
+
+                                            if expected_hash_bytes != machine_hash_bytes {
+                                                let _ = std::fs::remove_dir_all(&machine_dir_clone);
+                                                let _ = std::fs::remove_file(&lock_file_path_clone);
+                                                eprintln!("Expected hash from /hash file does not match machine_hash");
+                                                return;
+                                            }
+
+                                            let _ = std::fs::remove_file(&lock_file_path_clone);
+                                            println!("Download completed successfully");
+                                        });
 
                                         let json_response = serde_json::json!({
-                                            "state": "downloaded",
+                                            "state": "started_download",
                                         });
                                         let json_response =
                                             serde_json::to_string(&json_response).unwrap();

@@ -1143,7 +1143,6 @@ dependencies = [
  "hex",
  "hyper 0.14.30",
  "ipfs-api-backend-hyper",
- "rayon",
  "regex",
  "rs-car-ipfs",
  "serde_json",
