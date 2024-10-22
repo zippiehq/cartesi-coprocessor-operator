@@ -309,7 +309,7 @@ async fn main() {
                                         let snapshot_dir_clone = snapshot_dir.clone();
 
                                         // Spawn the background task
-                                        task::spawn(async move {
+                                        async_std::task::spawn(async move {
                                             let directory_cid = match cid_str_clone.parse::<Cid>() {
                                                 Ok(cid) => cid,
                                                 Err(_) => {
