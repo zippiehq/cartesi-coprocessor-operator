@@ -62,6 +62,11 @@ async fn main() {
                             return Ok::<_, Infallible>(err_response);
                         }
 
+                            let no_console_putchar = match req.headers().get("X-Console-Putchar") {
+                                Some(_) => true,
+                                None => false,
+                            };
+
                             let ruleset_header = req.headers().get("X-Ruleset");
 
                             let signing_requested = std::env::var("BLS_PRIVATE_KEY").is_ok();
@@ -141,7 +146,7 @@ async fn main() {
                                         &mut Box::new(output_callback),
                                         &mut Box::new(finish_callback),
                                         HashMap::new(),
-                                        false,
+                                        no_console_putchar,
                                     )
                                     .unwrap(),
                                 );
