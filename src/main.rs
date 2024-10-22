@@ -2,6 +2,7 @@ use advance_runner::run_advance;
 mod outputs_merkle;
 use alloy_primitives::utils::Keccak256;
 use alloy_primitives::B256;
+use async_std::channel::bounded;
 use async_std::fs::OpenOptions;
 use cid::Cid;
 use futures::TryStreamExt;
@@ -60,6 +61,11 @@ async fn main() {
                         ) {
                             return Ok::<_, Infallible>(err_response);
                         }
+
+                            let no_console_putchar = match req.headers().get("X-Console-Putchar") {
+                                Some(_) => true,
+                                None => false,
+                            };
 
                             let ruleset_header = req.headers().get("X-Ruleset");
 
@@ -140,7 +146,7 @@ async fn main() {
                                         &mut Box::new(output_callback),
                                         &mut Box::new(finish_callback),
                                         HashMap::new(),
-                                        false,
+                                        no_console_putchar,
                                     )
                                     .unwrap(),
                                 );
