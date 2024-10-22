@@ -32,5 +32,10 @@ if [ -z "$IPFS_WRITE_URL" ]; then
   IPFS_WRITE_URL=$IPFS_URL
 fi
 export IPFS_WRITE_URL
+if [ -z "$SNAPSHOT_DIR" ]; then 
+  mkdir -p /data/snapshot
+  SNAPSHOT_DIR=/data/snapshot
+fi
+export SNAPSHOT_DIR
 
 exec /operator/cartesi-coprocessor-operator

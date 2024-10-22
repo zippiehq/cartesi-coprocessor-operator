@@ -1,0 +1,27 @@
+version: "3"
+
+networks:
+  coprocessor-network:
+    name: coprocessor-network
+    driver: bridge
+
+services:
+  operator1:
+    env_file: "operator.env"
+    ports:
+      - "4001:4001/udp"
+      - "4001:4001/tcp"
+      - "3033:3033/tcp"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: coprocessor-operator1
+    volumes:
+      - ./operator1:/data
+    networks:
+      - coprocessor-network
+    healthcheck:
+      test: bash -c "[ cat < /dev/null > /dev/tcp/0.0.0.0/3033 ]"
+      interval: 10s
+      retries: 200
+      start_period: 15s
