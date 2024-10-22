@@ -63,8 +63,8 @@ async fn main() {
                         }
 
                             let no_console_putchar = match req.headers().get("X-Console-Putchar") {
-                                Some(_) => true,
-                                None => false,
+                                Some(_) => false,
+                                None => true,
                             };
 
                             let ruleset_header = req.headers().get("X-Ruleset");
