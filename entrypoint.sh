@@ -3,6 +3,7 @@ if [ ! -e /data/ipfs ]; then
   mkdir -p /data/ipfs
   IPFS_PATH=/data/ipfs ipfs init --profile=server
 fi
+IPFS_PATH=/data/ipfs ipfs config --bool Routing.AcceleratedDHTClient true
 IPFS_PATH=/data/ipfs ipfs config Addresses.API /ip4/0.0.0.0/tcp/5001
 IPFS_PATH=/data/ipfs ipfs config Addresses.Gateway /ip4/0.0.0.0/tcp/8080
 IPFS_PATH=/data/ipfs ipfs config --json Peering.Peers '[{"ID": "bafzbeibhqavlasjc7dvbiopygwncnrtvjd2xmryk5laib7zyjor6kf3avm", "Addrs": ["/dnsaddr/elastic.dag.house"]}]'
@@ -37,5 +38,6 @@ if [ -z "$SNAPSHOT_DIR" ]; then
   SNAPSHOT_DIR=/data/snapshot
 fi
 export SNAPSHOT_DIR
+export IPFS_PATH
 
 exec /operator/cartesi-coprocessor-operator
