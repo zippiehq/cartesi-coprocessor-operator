@@ -3,6 +3,7 @@ RUN apt-get update && apt-get install -y protobuf-compiler clang
 
 WORKDIR /operator
 
+COPY /signer-eigen /operator/signer-eigen
 COPY /src /operator/src
 COPY /Cargo.toml /operator/Cargo.toml
 COPY /Cargo.lock /operator/Cargo.lock
