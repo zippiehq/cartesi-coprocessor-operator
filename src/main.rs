@@ -315,7 +315,7 @@ async fn main() {
                                                 });
 
                                             let stat_uri = format!(
-                                                "{}/api/v0/dag/stat?arg={}",
+                                                "{}/api/v0/dag/stat?arg={}&progress=false",
                                                 ipfs_url, cid_str_clone
                                             );
 
@@ -369,7 +369,7 @@ async fn main() {
                                                     }
                                                 };
 
-                                            let actual_size = match stat_json["Size"].as_u64() {
+                                            let actual_size = match stat_json["TotalSize"].as_u64() {
                                                 Some(size) => size,
                                                 None => {
                                                     let _ =
