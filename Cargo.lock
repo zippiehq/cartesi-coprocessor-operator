@@ -3393,7 +3393,7 @@ dependencies = [
 [[package]]
 name = "rs-car-ipfs"
 version = "0.3.0"
-source = "git+https://github.com/zippiehq/rs-car-ipfs#160562345749ebed8a20cb9158926fca7ebeb361"
+source = "git+https://github.com/zippiehq/rs-car-ipfs?rev=2d893af9c9ab9aefe0e329bea4e8045b7f3015d7#2d893af9c9ab9aefe0e329bea4e8045b7f3015d7"
 dependencies = [
  "futures",
  "quick-protobuf",
