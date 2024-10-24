@@ -314,86 +314,11 @@ async fn main() {
                                                     "http://127.0.0.1:5001".to_string()
                                                 });
 
-                                            let stat_uri = format!(
-                                                "{}/api/v0/dag/stat?arg={}&progress=false",
-                                                ipfs_url, cid_str_clone
-                                            );
-
-                                            let stat_req = Request::builder()
-                                                .method("POST")
-                                                .uri(stat_uri)
-                                                .body(Body::empty())
-                                                .unwrap();
-
-                                            let client = Client::new();
-
-                                            let stat_res = match client.request(stat_req).await {
-                                                Ok(res) => res,
-                                                Err(err) => {
-                                                    let _ =
-                                                        std::fs::remove_file(&lock_file_path_clone);
-                                                    eprintln!("Failed to get DAG stat: {}", err);
-                                                    return;
-                                                }
-                                            };
-
-                                            let stat_body_bytes =
-                                                match hyper::body::to_bytes(stat_res.into_body())
-                                                    .await
-                                                {
-                                                    Ok(bytes) => bytes,
-                                                    Err(err) => {
-                                                        let _ = std::fs::remove_file(
-                                                            &lock_file_path_clone,
-                                                        );
-                                                        eprintln!(
-                                                            "Failed to read DAG stat response: {}",
-                                                            err
-                                                        );
-                                                        return;
-                                                    }
-                                                };
-
-                                            let stat_json: serde_json::Value =
-                                                match serde_json::from_slice(&stat_body_bytes) {
-                                                    Ok(json) => json,
-                                                    Err(err) => {
-                                                        let _ = std::fs::remove_file(
-                                                            &lock_file_path_clone,
-                                                        );
-                                                        eprintln!(
-                                                            "Failed to parse DAG stat response: {}",
-                                                            err
-                                                        );
-                                                        return;
-                                                    }
-                                                };
-
-                                            let actual_size = match stat_json["TotalSize"].as_u64() {
-                                                Some(size) => size,
-                                                None => {
-                                                    let _ =
-                                                        std::fs::remove_file(&lock_file_path_clone);
-                                                    eprintln!(
-                                                        "Failed to get Size from DAG stat response"
-                                                    );
-                                                    return;
-                                                }
-                                            };
-
-                                            if actual_size != expected_size_clone {
-                                                let _ = std::fs::remove_file(&lock_file_path_clone);
-                                                eprintln!(
-                                                    "Size mismatch: expected {}, got {}",
-                                                    expected_size_clone, actual_size
-                                                );
-                                                return;
-                                            }
-
                                             if let Err(err) = dedup_download_directory(
                                                 &ipfs_url,
                                                 directory_cid,
                                                 machine_dir_clone.clone(),
+                                                expected_size_clone,
                                             )
                                             .await
                                             {
@@ -592,6 +517,7 @@ async fn dedup_download_directory(
     ipfs_url: &str,
     directory_cid: Cid,
     out_file_path: String,
+    max_download: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let ipfs_client =
         <ipfs_api_backend_hyper::IpfsClient as ipfs_api_backend_hyper::TryFromUri>::from_str(
@@ -606,9 +532,20 @@ async fn dedup_download_directory(
         .first()
         .ok_or("No objects in IPFS ls response")?;
 
+    let mut current_downloaded = 0u64;
+
     std::fs::create_dir_all(&out_file_path)?;
 
     for val in &first_object.links {
+        if current_downloaded + val.size > max_download {
+            return Err(format!(
+                "Downloading file {} would bring us over max download limit",
+                val.name
+            )
+            .into());
+        }
+        current_downloaded += val.size;
+
         let req = Request::builder()
             .method("POST")
             .uri(format!("{}/api/v0/dag/export?arg={}", ipfs_url, val.hash))
@@ -632,7 +569,7 @@ async fn dedup_download_directory(
                     .open(&file_path)
                     .await?;
 
-                read_single_file_seek(&mut f, &mut out, None).await?;
+                read_single_file_seek(&mut f, &mut out, None, Some(val.size as usize)).await?;
             }
             Err(err) => {
                 return Err(format!("Error downloading file {}: {}", val.name, err).into());
