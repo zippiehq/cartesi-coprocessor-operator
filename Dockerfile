@@ -24,4 +24,5 @@ COPY ./entrypoint.sh /entrypoint.sh
 
 EXPOSE 3033
 WORKDIR /operator
+ENV IPFS_PATH=/data/ipfs
 CMD ["/entrypoint.sh"]
