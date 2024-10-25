@@ -1,6 +1,6 @@
 use advance_runner::run_advance;
 mod outputs_merkle;
-use alloy_primitives::utils::Keccak256;
+use alloy_primitives::utils::{keccak256, Keccak256};
 use alloy_primitives::B256;
 use async_std::channel::bounded;
 use async_std::fs::OpenOptions;
@@ -201,9 +201,9 @@ async fn main() {
                                 buffer.extend_from_slice(&payload_keccak.to_vec());
                                 buffer.extend_from_slice(&finish_result.lock().unwrap().1);
 
-                                let sha256_hash = Sha256::digest(&buffer);
+                                let keccak256_hash = keccak256(&buffer);
 
-                                let signature_hex = eigen_signer.sign(&sha256_hash);
+                                let signature_hex = eigen_signer.sign(&keccak256_hash.as_slice());
 
                                 if *reason.lock().unwrap() == Some(YieldManualReason::Accepted) {
                                     json_response["finish_callback"] =
