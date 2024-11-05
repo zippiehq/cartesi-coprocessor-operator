@@ -4,14 +4,19 @@ use alloy_primitives::utils::{keccak256, Keccak256};
 use alloy_primitives::B256;
 use async_std::channel::bounded;
 use async_std::fs::OpenOptions;
+use base64::{prelude::BASE64_STANDARD, Engine};
 use cid::Cid;
 use futures::TryStreamExt;
+use hyper::body::to_bytes;
 use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
+use hyper::Method;
 use hyper::{Body, Client, Request, Response, Server, StatusCode};
+use hyper_tls::HttpsConnector;
 use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::Error;
@@ -181,6 +186,21 @@ async fn main() {
                                "outputs_callback_vector": *outputs_vector,
                                "reports_callback_vector": *reports_vector,
                             });
+
+                            #[cfg(feature = "nitro_attestation")]
+                            {
+                                let data = hyper::body::to_bytes(
+                                    serde_json::to_string(&json_response).unwrap(),
+                                )
+                                .await
+                                .unwrap()
+                                .to_vec();
+
+                                let attestation_doc = get_attestation(data.clone()).await;
+                                json_response["attestation_doc"] =
+                                    serde_json::from_slice(&attestation_doc).unwrap();
+                            }
+
                             #[cfg(feature = "bls_signing")]
                             if signing_requested {
                                 let bls_private_key_str = std::env::var("BLS_PRIVATE_KEY")
@@ -215,7 +235,6 @@ async fn main() {
                                 json_response["signature"] =
                                     serde_json::Value::String(signature_hex);
                             }
-
                             let json_response = serde_json::to_string(&json_response).unwrap();
 
                             let response = Response::builder()
@@ -446,6 +465,28 @@ async fn main() {
     let server = Server::bind(&addr).serve(Box::new(service));
     println!("Server is listening on {}", addr);
     server.await.unwrap();
+}
+
+async fn get_attestation<T: AsRef<[u8]>>(user_data: T) -> Vec<u8> {
+    let client = Client::new();
+
+    let uri = "http://localhost:7777/v1/attestation".parse().unwrap();
+
+    let req_data = AttestationUserData {
+        user_data: BASE64_STANDARD.encode(user_data),
+    };
+
+    let mut req = Request::new(Body::from(serde_json::json!(req_data).to_string()));
+
+    *req.uri_mut() = uri;
+    *req.method_mut() = Method::POST;
+
+    let response = client.request(req).await.unwrap();
+    to_bytes(response.into_body()).await.unwrap().to_vec()
+}
+#[derive(Debug, Serialize, Deserialize)]
+struct AttestationUserData {
+    user_data: String,
 }
 fn check_hash_format(hash: &str, error_message: &str) -> Result<(), Response<Body>> {
     let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
