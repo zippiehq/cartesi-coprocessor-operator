@@ -198,7 +198,7 @@ async fn main() {
 
                                 let attestation_doc = get_attestation(data.clone()).await;
                                 json_response["attestation_doc"] =
-                                    serde_json::from_slice(&attestation_doc).unwrap();
+                                    serde_json::json!(&attestation_doc);
                             }
 
                             #[cfg(feature = "bls_signing")]
