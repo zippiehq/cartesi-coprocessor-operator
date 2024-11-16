@@ -1,29 +1,26 @@
 use advance_runner::run_advance;
 mod outputs_merkle;
 use alloy_primitives::utils::{keccak256, Keccak256};
-use alloy_primitives::B256;
+use alloy_primitives::{FixedBytes, B256};
 use async_std::channel::bounded;
 use async_std::fs::OpenOptions;
 use base64::{prelude::BASE64_STANDARD, Engine};
 use cid::Cid;
 use futures::TryStreamExt;
+use hex::FromHexError;
 use hyper::body::to_bytes;
 use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::Method;
-use hyper::{Body, Client, Request, Response, Server, StatusCode};
-use hyper_tls::HttpsConnector;
+use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use ipfs_api_backend_hyper::IpfsApi;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions as StdOpenOptions;
-use std::io::Error;
-use std::io::ErrorKind;
+use std::io::{Error, ErrorKind};
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::{convert::Infallible, net::SocketAddr};
 const HEIGHT: usize = 63;
 
@@ -189,14 +186,17 @@ async fn main() {
 
                             #[cfg(feature = "nitro_attestation")]
                             {
-                                let data = hyper::body::to_bytes(
-                                    serde_json::to_string(&json_response).unwrap(),
-                                )
-                                .await
-                                .unwrap()
-                                .to_vec();
+                                let finish_result_vec = finish_result.lock().unwrap().1.clone();
 
-                                let attestation_doc = get_attestation(data.clone()).await;
+                                let keccak256_hash = get_data_for_signing(
+                                    &ruleset_bytes,
+                                    machine_hash,
+                                    &payload,
+                                    &finish_result_vec,
+                                )
+                                .unwrap();
+
+                                let attestation_doc = get_attestation(keccak256_hash.as_slice()).await;
                                 json_response["attestation_doc"] =
                                     serde_json::json!(&attestation_doc);
                             }
@@ -206,22 +206,16 @@ async fn main() {
                                 let bls_private_key_str = std::env::var("BLS_PRIVATE_KEY")
                                     .expect("BLS_PRIVATE_KEY not set");
                                 let eigen_signer = SignerEigen::new(bls_private_key_str);
-                                let mut buffer = vec![0u8; 12];
-                                buffer.extend_from_slice(&ruleset_bytes);
 
-                                let machine_hash_bytes =
-                                    hex::decode(machine_hash).expect("Invalid machine_hash hex");
+                                let finish_result_vec = finish_result.lock().unwrap().1.clone();
 
-                                buffer.extend_from_slice(&machine_hash_bytes);
-
-                                let mut hasher = Keccak256::new();
-                                hasher.update(payload.clone());
-                                let payload_keccak = hasher.finalize();
-
-                                buffer.extend_from_slice(&payload_keccak.to_vec());
-                                buffer.extend_from_slice(&finish_result.lock().unwrap().1);
-
-                                let keccak256_hash = keccak256(&buffer);
+                                let keccak256_hash = get_data_for_signing(
+                                    &ruleset_bytes,
+                                    machine_hash,
+                                    &payload,
+                                    &finish_result_vec,
+                                )
+                                .unwrap();
 
                                 let signature_hex = eigen_signer.sign(&keccak256_hash.as_slice());
 
@@ -619,4 +613,27 @@ async fn dedup_download_directory(
     }
 
     Ok(())
+}
+
+fn get_data_for_signing(
+    ruleset_bytes: &Vec<u8>,
+    machine_hash: &str,
+    payload: &Vec<u8>,
+    finish_result: &Vec<u8>,
+) -> Result<FixedBytes<32>, FromHexError> {
+    let mut buffer = vec![0u8; 12];
+    buffer.extend_from_slice(&ruleset_bytes);
+
+    let machine_hash_bytes = hex::decode(machine_hash)?;
+
+    buffer.extend_from_slice(&machine_hash_bytes);
+
+    let mut hasher = Keccak256::new();
+    hasher.update(payload);
+    let payload_keccak = hasher.finalize();
+
+    buffer.extend_from_slice(&payload_keccak.to_vec());
+    buffer.extend_from_slice(&finish_result);
+
+    Ok(keccak256(&buffer))
 }
