@@ -196,7 +196,8 @@ async fn main() {
                                 )
                                 .unwrap();
 
-                                let attestation_doc = get_attestation(keccak256_hash.as_slice()).await;
+                                let attestation_doc = BASE64_STANDARD
+                                    .encode(get_attestation(keccak256_hash.as_slice()).await);
                                 json_response["attestation_doc"] =
                                     serde_json::json!(&attestation_doc);
                             }
