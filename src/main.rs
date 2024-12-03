@@ -163,6 +163,7 @@ async fn main() {
                             };
 
                             let ruleset_header = req.headers().get("X-Ruleset");
+                            let max_ops_header = req.headers().get("X-Max-Ops");
 
                             let signing_requested = std::env::var("BLS_PRIVATE_KEY").is_ok();
 
@@ -175,12 +176,41 @@ async fn main() {
                                 Vec::new()
                             };
 
+                            let max_ops = match max_ops_header {
+                                Some(value) => match value.to_str().unwrap().parse::<i64>() {
+                                    Ok(parsed_to_i64_value) => parsed_to_i64_value,
+                                    Err(e) => {
+                                        let json_error = serde_json::json!({
+                                            "error": e.to_string(),
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::BAD_REQUEST)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                },
+                                None => {
+                                    let json_error = serde_json::json!({
+                                        "error": "X-Max-Ops header is required ",
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            };
                             let payload = hyper::body::to_bytes(req.into_body())
                                 .await
                                 .unwrap()
                                 .to_vec();
+                            let priority_fee = 1;
 
-                            let priority = 0;
+                            let priority = priority_fee * max_ops;
 
                             let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
                             let machine_snapshot_path =
