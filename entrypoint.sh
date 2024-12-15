@@ -28,6 +28,7 @@ while true; do
    sleep 0.5
 done
 echo "IPFS up"
+
 IPFS_URL=http://127.0.0.1:5001
 if [ -z "$IPFS_WRITE_URL" ]; then
   IPFS_WRITE_URL=$IPFS_URL
@@ -39,5 +40,3 @@ if [ -z "$SNAPSHOT_DIR" ]; then
 fi
 export SNAPSHOT_DIR
 export IPFS_PATH
-
-exec /operator/cartesi-coprocessor-operator
