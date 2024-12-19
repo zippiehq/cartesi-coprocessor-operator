@@ -16,6 +16,8 @@ ipfs-api-backend-hyper = { version = "0.6.0", features = ["with-send-sync"], def
 futures = "0.3"
 cid = "0.8.6"
 alloy-primitives = "0.8.7"
+alloy-provider = "0.8.1"
+alloy-rpc-types-eth = "0.8.1"
 serde = "1.0.214"
 base64 = "0.22.1"
 rusqlite = { version = "0.25.3", features=["bundled"] }

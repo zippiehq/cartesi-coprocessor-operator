@@ -1,5 +1,8 @@
 use advance_runner::run_advance;
 use advance_runner::YieldManualReason;
+use alloy_primitives::{Address, FixedBytes, B256, U256};
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
 use futures_channel::oneshot::Sender;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -165,7 +168,7 @@ pub(crate) fn handle_database_request(
     }
 }
 
-pub(crate) fn handle_classic(
+pub(crate) fn handle_classic<'a>(
     classic_request: &ClassicRequest,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn std::error::Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
@@ -195,6 +198,52 @@ pub(crate) fn handle_classic(
         finish_result = result.as_mut().unwrap().clone();
         return result;
     };
+    
+    let get_storage_at = |block_hash: &'a [u8; 32], address: &'a str, storage_slot: usize| async move {
+        let address = Address::parse_checksummed(address, None)
+            .expect("can't convert sent value address to type Address");
+        let get_storage_request = ProviderBuilder::new()
+            .on_http("http://anvil:8545".parse().unwrap())
+            .get_storage_at(address, U256::from(storage_slot));
+        let storage = get_storage_request
+            .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                block_hash,
+            ))))
+            .await
+            .unwrap();
+        return B256::from(storage);
+    };
+
+    let get_code = |block_hash: &'a [u8; 32], address: &'a str| async move {
+        let address = Address::parse_checksummed(address, None)
+            .expect("can't convert sent value address to type Address");
+        let get_code_request = ProviderBuilder::new()
+            .on_http("http://anvil:8545".parse().unwrap())
+            .get_code_at(address);
+        let code_bytes = get_code_request
+            .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                block_hash,
+            ))))
+            .await
+            .unwrap();
+        return code_bytes;
+    };
+
+    let get_account = |block_hash: &'a [u8; 32], address: &'a str| async move {
+        let address = Address::parse_checksummed(address, None)
+            .expect("can't convert sent value address to type Address");
+        let get_account_request = ProviderBuilder::new()
+            .on_http("http://anvil:8545".parse().unwrap())
+            .get_account(address);
+        let account = get_account_request
+            .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                block_hash,
+            ))))
+            .await
+            .unwrap();
+        return (account.balance, account.nonce);
+    };
+
     let reason = run_advance(
         classic_request.machine_snapshot_path.clone(),
         None,
