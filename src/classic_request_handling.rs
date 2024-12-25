@@ -1,12 +1,17 @@
 use advance_runner::run_advance;
 use advance_runner::YieldManualReason;
+use alloy_primitives::{Address, FixedBytes, U256};
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
 use futures_channel::oneshot::Sender;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
+use reqwest::Url;
 use rusqlite::params;
 use std::collections::HashMap;
-use std::io::Error;
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
 pub(crate) fn add_request_to_database(
@@ -139,12 +144,12 @@ pub(crate) fn query_request_with_the_highest_priority(
     }
 }
 
-pub(crate) fn handle_database_request(
+pub(crate) async fn handle_database_request(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
-    let response = handle_classic(classic_request).unwrap();
+    let response = handle_classic(classic_request).await.unwrap();
 
     let reason = match response.1 {
         YieldManualReason::Accepted => 1,
@@ -165,7 +170,7 @@ pub(crate) fn handle_database_request(
     }
 }
 
-pub(crate) fn handle_classic(
+pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn std::error::Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
@@ -179,33 +184,128 @@ pub(crate) fn handle_classic(
     let mut outputs_vector: Vec<(u16, Vec<u8>)> = Vec::new();
     let mut reports_vector: Vec<(u16, Vec<u8>)> = Vec::new();
     let mut finish_result: (u16, Vec<u8>) = (0, vec![0]);
-    let output_callback = |reason: u16, payload: &[u8]| {
-        let mut result: Result<(u16, Vec<u8>), Error> = Ok((reason, payload.to_vec()));
+    let mut output_callback = |reason: u16, payload: &[u8]| {
+        let mut result: Result<(u16, Vec<u8>), Box<dyn std::error::Error>> =
+            Ok((reason, payload.to_vec()));
         outputs_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
 
-    let report_callback = |reason: u16, payload: &[u8]| {
-        let mut result: Result<(u16, Vec<u8>), Error> = Ok((reason, payload.to_vec()));
+    let mut report_callback = |reason: u16, payload: &[u8]| {
+        let mut result: Result<(u16, Vec<u8>), Box<dyn std::error::Error>> =
+            Ok((reason, payload.to_vec()));
         reports_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
-    let finish_callback = |reason: u16, payload: &[u8]| {
-        let mut result: Result<(u16, Vec<u8>), Error> = Ok((reason, payload.to_vec()));
+    let mut finish_callback = |reason: u16, payload: &[u8]| {
+        let mut result: Result<(u16, Vec<u8>), Box<dyn std::error::Error>> =
+            Ok((reason, payload.to_vec()));
         finish_result = result.as_mut().unwrap().clone();
         return result;
     };
+
+    let get_storage: Box<
+        dyn Fn(
+            u16,
+            Vec<u8>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error>>>>>,
+    > = Box::new(|reason: u16, input: Vec<u8>| {
+        Box::pin(async move {
+            let block_hash: [u8; 32] = input[0..32].try_into()?;
+            let address: [u8; 20] = input[32..53].try_into()?;
+            let storage_slot: [u8; 32] = input[53..86].try_into()?;
+
+            let ethereum_endpoint = std::env::var("ETHEREUM_ENDPOINT")
+                .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
+            let address = Address::from(address);
+            let get_storage_request = ProviderBuilder::new()
+                .on_http(Url::parse(&ethereum_endpoint)?)
+                .get_storage_at(address, U256::from_be_bytes(storage_slot));
+            let storage = get_storage_request
+                .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                    &block_hash,
+                ))))
+                .await?;
+            let result: Result<Vec<u8>, Box<dyn std::error::Error>> = Ok(storage.to_be_bytes_vec());
+            return result;
+        })
+    });
+
+    let get_code: Box<
+        dyn Fn(
+            u16,
+            Vec<u8>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error>>>>>,
+    > = Box::new(|reason: u16, input: Vec<u8>| {
+        Box::pin(async move {
+            let block_hash: [u8; 32] = input[0..32].try_into()?;
+            let address: [u8; 20] = input[32..53].try_into()?;
+            let ethereum_endpoint = std::env::var("ETHEREUM_ENDPOINT")
+                .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
+            let address = Address::from(address);
+            let get_code_request = ProviderBuilder::new()
+                .on_http(Url::parse(&ethereum_endpoint)?)
+                .get_code_at(address);
+            let code_bytes = get_code_request
+                .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                    &block_hash,
+                ))))
+                .await?;
+
+            let result: Result<Vec<u8>, Box<dyn std::error::Error>> = Ok(code_bytes.to_vec());
+            return result;
+        })
+    });
+
+    let get_account: Box<
+        dyn Fn(
+            u16,
+            Vec<u8>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error>>>>>,
+    > = Box::new(|reason: u16, input: Vec<u8>| {
+        Box::pin(async move {
+            let block_hash: [u8; 32] = input[0..32].try_into()?;
+            let address: [u8; 20] = input[32..53].try_into()?;
+            let ethereum_endpoint = std::env::var("ETHEREUM_ENDPOINT")
+                .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
+            let address = Address::from(address);
+            let get_account_request = ProviderBuilder::new()
+                .on_http(Url::parse(&ethereum_endpoint)?)
+                .get_account(address);
+            let account = get_account_request
+                .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                    &block_hash,
+                ))))
+                .await?;
+
+            let result: Result<Vec<u8>, Box<dyn std::error::Error>> = Ok([
+                account.balance.to_be_bytes_vec(),
+                account.nonce.to_be_bytes().to_vec(),
+            ]
+            .concat());
+            return result;
+        })
+    });
+    let mut callbacks = HashMap::new();
+    callbacks.insert(4, get_storage);
+    callbacks.insert(5, get_code);
+    callbacks.insert(6, get_account);
     let reason = run_advance(
         classic_request.machine_snapshot_path.clone(),
         None,
         classic_request.payload.clone(),
         HashMap::new(),
-        &mut Box::new(report_callback),
-        &mut Box::new(output_callback),
-        &mut Box::new(finish_callback),
-        HashMap::new(),
+        &mut report_callback,
+        &mut output_callback,
+        &mut finish_callback,
+        callbacks,
         no_console_putchar,
-    )?;
+    )
+    .await
+    .unwrap();
 
     Ok((
         RunAdvanceResponses {
