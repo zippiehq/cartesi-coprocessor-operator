@@ -4,6 +4,8 @@ use alloy_primitives::utils::{keccak256, Keccak256};
 use alloy_primitives::{FixedBytes, B256};
 use async_std::fs::OpenOptions;
 use base64::{prelude::BASE64_STANDARD, Engine};
+use cbor::Decoder;
+use chrono::Utc;
 use cid::Cid;
 use classic_request_handling::{
     add_request_to_database, check_previously_handled_results, handle_database_request,
@@ -17,9 +19,12 @@ use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use ipfs_api_backend_hyper::IpfsApi;
+use r2d2::Pool;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
@@ -66,6 +71,28 @@ async fn main() {
             params![],
         )
         .unwrap();
+
+    // Create table for preimages
+    sqlite_connect
+        .execute(
+            "CREATE TABLE IF NOT EXISTS preimages (
+            hash_type               INTEGER CHECK( hash_type IN (1, 2) ) NOT NULL,
+            hash                    BLOB NOT NULL,
+            created_at              INTEGER NOT NULL,
+            storage_rent_paid_until INTEGER NOT NULL,
+            data                    BLOB NOT NULL
+            );",
+            params![],
+        )
+        .unwrap();
+
+    sqlite_connect
+        .execute(
+            "CREATE INDEX IF NOT EXISTS preimages_hash ON preimages (hash);",
+            [],
+        )
+        .unwrap();
+
     // Create table for results
     sqlite_connect
         .execute(
@@ -362,6 +389,131 @@ async fn main() {
 
                             return Ok::<_, Infallible>(response);
                         }
+                        (hyper::Method::POST, ["check_preimages_status"]) => {
+                            let hash_types_and_hashes: Vec<u8> =
+                                hyper::body::to_bytes(req.into_body())
+                                    .await
+                                    .unwrap()
+                                    .to_vec();
+                            let hash_types_and_hashes =
+                                match decode_hash_types_and_hashes(hash_types_and_hashes) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        let json_error = serde_json::json!({
+                                            "error": e.to_string(),
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::BAD_REQUEST)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                };
+                            let mut json_response = Value::Null;
+                            for preimage_hash_type_and_hash in hash_types_and_hashes {
+                                if preimage_hash_type_and_hash.1.len() > 64 {
+                                    json_response[hex::encode(preimage_hash_type_and_hash.1)] = serde_json::json!(
+                                        "the hash length should be up to 64 bytes"
+                                    );
+                                    continue;
+                                }
+
+                                let availability_response =
+                                    match preimage_available(&pool, &preimage_hash_type_and_hash) {
+                                        Ok(true) => "available",
+                                        Ok(false) => "unavailable",
+                                        Err(e) => {
+                                            json_response
+                                                [hex::encode(preimage_hash_type_and_hash.1)] =
+                                                serde_json::json!(e.to_string());
+                                            continue;
+                                        }
+                                    };
+                                let data = vec![(
+                                    &preimage_hash_type_and_hash.0,
+                                    &preimage_hash_type_and_hash.1,
+                                    availability_response,
+                                )];
+                                let mut encoder = cbor::Encoder::from_memory();
+                                encoder.encode(&data).unwrap();
+                                json_response[hex::encode(preimage_hash_type_and_hash.1)] =
+                                    serde_json::json!(hex::encode(encoder.as_bytes()));
+                            }
+                            let json_response = serde_json::to_string(&json_response).unwrap();
+
+                            let response = Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(json_response))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
+                        (hyper::Method::POST, ["upload_preimages"]) => {
+                            let preimages_cbor: Vec<u8> = hyper::body::to_bytes(req.into_body())
+                                .await
+                                .unwrap()
+                                .to_vec();
+                            let preimages_data = match decode_preimages(preimages_cbor) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    let json_error = serde_json::json!({
+                                        "error": e.to_string(),
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            };
+                            let mut json_response = Value::Null;
+                            for preimage in preimages_data {
+                                if preimage.1.len() > 64 {
+                                    json_response[hex::encode(preimage.1)] = serde_json::json!(
+                                        "the hash length should be up to 64 bytes"
+                                    );
+                                    continue;
+                                }
+
+                                if preimage.2.len() > (256 * 1024) {
+                                    json_response[hex::encode(preimage.1)] =
+                                        serde_json::json!("the data is too big");
+                                    continue;
+                                }
+
+                                if record_exists(&pool, &preimage) {
+                                    json_response[hex::encode(preimage.1)] = serde_json::json!(
+                                        "the record already exists in the database"
+                                    );
+                                    continue;
+                                }
+                                if let Err(e) =
+                                    check_preimage_hash(&preimage.0, &preimage.1, &preimage.2)
+                                {
+                                    json_response[hex::encode(preimage.1)] =
+                                        serde_json::json!(e.to_string());
+                                    continue;
+                                }
+                                if let Err(e) = upload_image_to_sqlite_db(&pool, &preimage) {
+                                    json_response[hex::encode(preimage.1)] =
+                                        serde_json::json!(e.to_string());
+                                    continue;
+                                }
+                                json_response[hex::encode(preimage.1)] =
+                                    serde_json::json!("was uploaded successfully");
+                            }
+                            let json_response = serde_json::to_string(&json_response).unwrap();
+
+                            let response = Response::builder()
+                                .status(StatusCode::OK)
+                                .body(Body::from(json_response))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
                         (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                             // Check machine_hash format
                             if let Err(err_response) = check_hash_format(
@@ -581,6 +733,121 @@ async fn main() {
     println!("Server is listening on {}", addr);
     server.await.unwrap();
 }
+fn check_preimage_hash(
+    hash_type: &u8,
+    hash: &Vec<u8>,
+    data: &Vec<u8>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if hash_type == &(HashType::SHA256 as u8) {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let result = hasher.finalize();
+        if &result.to_vec() == hash {
+            return Ok(());
+        } else {
+            return Err(Box::<dyn std::error::Error>::from(
+                "sha256 of the data and the hash don't match",
+            ));
+        }
+    }
+
+    if hash_type == &(HashType::KECCAK256 as u8) {
+        let mut hasher = Keccak256::new();
+        hasher.update(data);
+        let result = hasher.finalize();
+        if &result.to_vec() == hash {
+            return Ok(());
+        } else {
+            return Err(Box::<dyn std::error::Error>::from(
+                "keccak256 of the data and the hash don't match",
+            ));
+        }
+    }
+    return Err(Box::<dyn std::error::Error>::from(
+        "sent hash type isn't supported",
+    ));
+}
+
+fn preimage_available(
+    pool: &Pool<SqliteConnectionManager>,
+    hash_type_and_data: &(u8, Vec<u8>),
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let sqlite_connection = pool.get()?;
+
+    let mut statement = sqlite_connection.prepare(
+        "SELECT storage_rent_paid_until FROM preimages WHERE hash_type = ? AND hash = ?;",
+    )?;
+
+    let mut rows = statement.query(params![hash_type_and_data.0, hash_type_and_data.1])?;
+    if let Some(statement) = rows.next()? {
+        return Ok(Utc::now().timestamp() < statement.get::<_, i64>(0)?);
+    } else {
+        return Err(Box::<dyn std::error::Error>::from(
+            "database record wasn't found",
+        ));
+    }
+}
+fn record_exists(
+    pool: &Pool<SqliteConnectionManager>,
+    preimage_data: &(u8, Vec<u8>, Vec<u8>),
+) -> bool {
+    let sqlite_connection = pool.get().unwrap();
+
+    let mut statement = sqlite_connection
+        .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ? AND data = ?;")
+        .unwrap();
+
+    let mut rows = statement
+        .query(params![preimage_data.0, preimage_data.1, preimage_data.2])
+        .unwrap();
+    if let Some(_) = rows.next().unwrap() {
+        return true;
+    }
+    return false;
+}
+fn upload_image_to_sqlite_db(
+    pool: &Pool<SqliteConnectionManager>,
+    preimage_data: &(u8, Vec<u8>, Vec<u8>),
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !(preimage_data.0 == HashType::SHA256 as u8 || preimage_data.0 == HashType::KECCAK256 as u8)
+    {
+        return Err(Box::<dyn std::error::Error>::from(
+            "sent hash type isn't supported",
+        ));
+    }
+    let created_at = Utc::now();
+    let storage_rent_paid_until = created_at + chrono::Duration::days(365);
+
+    let sqlite_connection = pool.get()?;
+
+    sqlite_connection.execute(
+        "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data) 
+                               VALUES (?, ?, ?, ?, ?)",
+        params![
+            preimage_data.0,
+            preimage_data.1,
+            created_at.timestamp(),
+            storage_rent_paid_until.timestamp(),
+            preimage_data.2
+        ],
+    )?;
+    return Ok(());
+}
+
+fn decode_hash_types_and_hashes(
+    hash_types_and_hashes: Vec<u8>,
+) -> Result<Vec<(u8, Vec<u8>)>, Box<dyn std::error::Error>> {
+    let mut decoder = Decoder::from_bytes(hash_types_and_hashes);
+    let types_and_hashes: Vec<(u8, Vec<u8>)> = decoder.decode().collect::<Result<_, _>>()?;
+    return Ok(types_and_hashes);
+}
+fn decode_preimages(
+    preimages_cbor: Vec<u8>,
+) -> Result<Vec<(u8, Vec<u8>, Vec<u8>)>, Box<dyn std::error::Error>> {
+    let mut decoder = Decoder::from_bytes(preimages_cbor);
+    let preimages: Vec<(u8, Vec<u8>, Vec<u8>)> = decoder.decode().collect::<Result<_, _>>()?;
+    return Ok(preimages);
+}
 async fn get_attestation<T: AsRef<[u8]>>(user_data: T) -> Vec<u8> {
     let client = Client::new();
 
@@ -756,4 +1023,9 @@ fn get_data_for_signing(
     buffer.extend_from_slice(&finish_result);
 
     Ok(keccak256(&buffer))
+}
+
+enum HashType {
+    SHA256 = 1,
+    KECCAK256 = 2,
 }

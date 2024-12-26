@@ -1,5 +1,5 @@
-use advance_runner::run_advance;
 use advance_runner::YieldManualReason;
+use advance_runner::{run_advance, Callback};
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
@@ -8,12 +8,14 @@ use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
 use rusqlite::params;
+use rusqlite::Connection;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
+use std::vec;
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
@@ -289,10 +291,32 @@ pub(crate) async fn handle_classic(
             return result;
         })
     });
+
+    let get_preimage = |reason: u16,
+                        mut input: Vec<u8>|
+     -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let hash_type = input.remove(0);
+        let data = input;
+        let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
+        let sqlite_connection = Connection::open(&Path::new(&db_directory).join("requests.db"))?;
+        let mut statement = sqlite_connection
+            .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ?;")?;
+
+        let mut rows = statement.query(params![hash_type, data])?;
+
+        if let Some(statement) = rows.next()? {
+            // Query data from the database and return it
+            return Ok(statement.get::<_, Vec<u8>>(4)?);
+        }
+        return Err(Box::<dyn std::error::Error>::from(
+            "No data found with such hash and hash type",
+        ));
+    };
     let mut callbacks = HashMap::new();
-    callbacks.insert(4, get_storage);
-    callbacks.insert(5, get_code);
-    callbacks.insert(6, get_account);
+    callbacks.insert(0x27, Callback::Async(get_storage));
+    callbacks.insert(0x28, Callback::Async(get_code));
+    callbacks.insert(0x29, Callback::Async(get_account));
+    callbacks.insert(0x2a, Callback::Sync(Box::new(get_preimage)));
     let reason = run_advance(
         classic_request.machine_snapshot_path.clone(),
         None,
