@@ -81,11 +81,12 @@ async fn main() {
         metadata_url: Some("eigensdk-rs".to_string()),
     };
 
-    let _ = el_chain_writer
+    /* let _ = el_chain_writer
         .register_as_operator(operator_details)
         .await
         .unwrap();
-
+    */
+    
     let tokens = el_chain_reader
         .get_strategy_and_underlying_erc20_token(
             Address::parse_checksummed(opt.strategy_deposit_address.clone(), None).unwrap(),
