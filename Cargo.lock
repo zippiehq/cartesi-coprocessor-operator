@@ -20,7 +20,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 [[package]]
 name = "advance_runner"
 version = "0.1.0"
-source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=70780ca3fb56f534d9eac8b64269e44599d1eb93#70780ca3fb56f534d9eac8b64269e44599d1eb93"
+source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=b9dc07033cf46b109033295101e6cf9ef4ae30b7#b9dc07033cf46b109033295101e6cf9ef4ae30b7"
 dependencies = [
  "alloy-primitives 0.7.7",
  "alloy-sol-types 0.7.7",
@@ -1562,7 +1562,7 @@ dependencies = [
 [[package]]
 name = "cartesi-machine"
 version = "0.18.1"
-source = "git+https://github.com/cartesi/dave?rev=68a068b135a42c10e254a116e2930539f1c28727#68a068b135a42c10e254a116e2930539f1c28727"
+source = "git+https://github.com/zippiehq/dave?rev=a75b74c81ee0d2588cd7a1f4a5d28a9f4ebce729#a75b74c81ee0d2588cd7a1f4a5d28a9f4ebce729"
 dependencies = [
  "cartesi-machine-sys",
  "hex",
@@ -1572,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "cartesi-machine-sys"
 version = "0.18.1"
-source = "git+https://github.com/cartesi/dave?rev=68a068b135a42c10e254a116e2930539f1c28727#68a068b135a42c10e254a116e2930539f1c28727"
+source = "git+https://github.com/zippiehq/dave?rev=a75b74c81ee0d2588cd7a1f4a5d28a9f4ebce729#a75b74c81ee0d2588cd7a1f4a5d28a9f4ebce729"
 dependencies = [
  "bindgen",
  "bytes",
