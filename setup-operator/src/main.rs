@@ -105,7 +105,10 @@ async fn main() {
         strategy_manager_address,
         U256::from(opt.strategy_deposit_amount),
     );
-    let _ = contract_call.send().await.unwrap().watch().await.unwrap();
+    
+    let approve_tx: FixedBytes<32> = contract_call.send().await.unwrap().watch().await.unwrap();
+    wait_transaction(&opt.http_endpoint, approve_tx).await.unwrap();
+    
     let contract_strategy_manager = StrategyManager::new(strategy_manager_address, &provider);
 
     let deposit_contract_call = contract_strategy_manager.depositIntoStrategy(
