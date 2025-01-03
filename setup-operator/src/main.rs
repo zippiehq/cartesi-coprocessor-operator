@@ -106,6 +106,7 @@ async fn main() {
         U256::from(opt.strategy_deposit_amount),
     );
     
+    
     let approve_tx: FixedBytes<32> = contract_call.send().await.unwrap().watch().await.unwrap();
     wait_transaction(&opt.http_endpoint, approve_tx).await.unwrap();
     
@@ -116,11 +117,13 @@ async fn main() {
         underlying_token,
         U256::from(opt.strategy_deposit_amount),
     );
+    println!("{:?}", deposit_contract_call.calldata());
 
     let tx: FixedBytes<32> = deposit_contract_call
         .send()
         .await
         .unwrap()
+        .with_required_confirmations(2)
         .watch()
         .await
         .unwrap();
