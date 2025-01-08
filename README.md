@@ -4,7 +4,7 @@
 * Install Docker - https://docs.docker.com/engine/install/ubuntu/
 * Set Docker up as a swarm manager in order to add Docker secrets
 
-```docker swarm init``
+```docker swarm init```
 
 * Generate a BLS key for your operator (generate a new one for this AVS if you already run existing AVS, don't reuse keys)
 
