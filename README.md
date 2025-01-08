@@ -34,3 +34,5 @@
 * Run a sample task:
 
 ```curl -X POST -H "X-Ruleset: B819BA4c5d2b64d07575ff4B30d3e0Eca219BFd5" -H "X-Max-Ops: 1" -H "X-Console-Putchar: true"  -d "test2" -v http://127.0.0.1:3033/classic/11084eeb3de8d6ad262736d1f59b129fc9c134ab52248d39c2c920facafe8403```
+
+* Process more concurrent computation jobs: set MAX_THREADS_NUMBER environment variable to a higher integer amount (currently 3 by default)
