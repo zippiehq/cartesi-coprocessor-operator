@@ -47,5 +47,5 @@ if [ -z "$SNAPSHOT_DIR" ]; then
 fi
 export SNAPSHOT_DIR
 export IPFS_PATH
-
+export BLS_PRIVATE_KEY
 exec /operator/cartesi-coprocessor-operator
