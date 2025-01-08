@@ -8,18 +8,23 @@ networks:
 services:
   operator1:
     env_file: "operator.env"
+    environment:
+      DB_DIRECTORY=/db
+      SNAPSHOT_DIR=/snapshots
     ports:
       - "4001:4001/udp"
       - "4001:4001/tcp"
       - "3033:3033/tcp"
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/zippiehq/cartesi-coprocessor-operator:latest
     container_name: coprocessor-operator1
     volumes:
-      - ./operator1:/data
+      - ./operator1-ipfs:/data
+      - ./operator1-snapshots:/snapshots
+      - ./operator1-db:/db
     networks:
       - coprocessor-network
+    cap_drop:
+        - ALL
     healthcheck:
       test: bash -c "[ cat < /dev/null > /dev/tcp/0.0.0.0/3033 ]"
       interval: 10s
