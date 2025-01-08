@@ -1,4 +1,11 @@
 #!/bin/bash
+if [ -z "$BLS_PRIVATE_KEY" && -e /run/secrets/bls_private_key ]; then
+	BLS_PRIVATE_KEY=$(cat /run/secrets/bls_private_key)
+fi
+if [ -z "$BLS_PRIVATE_KEY" ]; then
+ 	echo "error: No BLS_PRIVATE_KEY set"
+ 	exit 1
+fi
 if [ ! -e /data/ipfs ]; then
   mkdir -p /data/ipfs
   IPFS_PATH=/data/ipfs ipfs init --profile=server
