@@ -25,3 +25,5 @@
 
 ```mkdir -p operator1-ipfs operator1-snapshots operator1-db```
  
+* Bring it up
+```docker compose up -d --wait```
