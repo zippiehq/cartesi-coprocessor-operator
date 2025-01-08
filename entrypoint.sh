@@ -1,4 +1,7 @@
 #!/bin/bash
+if [ ! -z "$BLS_SECRET_KEY" && -e /run/secrets/bls_secret_key ]; then
+	BLS_SECRET_KEY=$(cat /run/secrets/bls_secret_key)
+fi
 if [ ! -e /data/ipfs ]; then
   mkdir -p /data/ipfs
   IPFS_PATH=/data/ipfs ipfs init --profile=server
