@@ -1,9 +1,11 @@
-version: "3"
-
 networks:
   coprocessor-network:
     name: coprocessor-network
     driver: bridge
+
+secrets:
+  operator1_bls_private_key:
+    file: ./operator1_bls_private_key
 
 services:
   operator1:
