@@ -1,5 +1,5 @@
 #!/bin/bash
-if [ -z "$BLS_PRIVATE_KEY" && -e /run/secrets/bls_private_key ]; then
+if [ -z "$BLS_PRIVATE_KEY" ] && [ -e /run/secrets/bls_private_key ]; then
 	BLS_PRIVATE_KEY=$(cat /run/secrets/bls_private_key)
 fi
 if [ -z "$BLS_PRIVATE_KEY" ]; then
