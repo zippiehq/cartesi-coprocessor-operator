@@ -11,8 +11,8 @@ services:
       - source: operator1_bls_privatet_key
         target: bls_private_key
     environment:
-      DB_DIRECTORY=/db
-      SNAPSHOT_DIR=/snapshots
+      - DB_DIRECTORY=/db
+      - SNAPSHOT_DIR=/snapshots
     ports:
       - "4001:4001/udp"
       - "4001:4001/tcp"
