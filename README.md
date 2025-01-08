@@ -28,7 +28,7 @@
 
 * Download a machine to test with, ctrl-c when it says "ready"
 
-```while true; do curl -X POST "http://127.0.0.1:3033/ensure/bafybeihpo6pncx7hyf26v6vszb25q4spszigxkfc4fxvamfzpy5b2bjydm/11084eeb3de8d6ad262736d1f59b129fc9c134ab52248d39c2c920facafe8403/289182342"; sleep 60; done
+```while true; do curl -X POST "http://127.0.0.1:3033/ensure/bafybeihpo6pncx7hyf26v6vszb25q4spszigxkfc4fxvamfzpy5b2bjydm/11084eeb3de8d6ad262736d1f59b129fc9c134ab52248d39c2c920facafe8403/289182342"; sleep 60; done```
 
 * Run a sample task:
 
