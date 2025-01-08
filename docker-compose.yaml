@@ -8,7 +8,7 @@ networks:
 services:
   operator1:
     secrets:
-      - source: operator1_bls_privatet_key
+      - source: operator1_bls_private_key
         target: bls_private_key
     environment:
       - DB_DIRECTORY=/db
