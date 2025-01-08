@@ -21,6 +21,7 @@
 - Note the BLS private key as shown on screen
 
 * Store the secret so the Create a docker secret for the BLS key (paste it into this command)
+
 ```read blskey && echo -n "$blskey > operator1_bls_private_key && blskey=```
  
 * Bring it up
