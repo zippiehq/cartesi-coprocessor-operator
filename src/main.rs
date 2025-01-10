@@ -187,11 +187,13 @@ async fn main() {
                             return Ok::<_, Infallible>(err_response);
                         }
 
-                            let no_console_putchar = match req.headers().get("X-Console-Putchar") {
+                            let mut no_console_putchar = match req.headers().get("X-Console-Putchar") {
                                 Some(_) => false,
                                 None => true,
                             };
-
+                            if std::env::var("ALWAYS_CONSOLE_PUTCHAR").is_ok() {
+                                no_console_putchar = false;
+                            }
                             let ruleset_header = req.headers().get("X-Ruleset");
                             let max_ops_header = req.headers().get("X-Max-Ops");
 
