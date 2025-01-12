@@ -1,11 +1,12 @@
 FROM rust:latest as builder
-RUN apt-get update && apt-get install -y protobuf-compiler clang
+RUN apt-get update && apt-get install -y protobuf-compiler clang libboost1.81-dev
 
 WORKDIR /operator
 
 COPY /signer-eigen /operator/signer-eigen
 COPY /src /operator/src
 COPY /Cargo.toml /operator/Cargo.toml
+COPY /.cargo /operator/.cargo
 COPY /Cargo.lock /operator/Cargo.lock
 
 WORKDIR /setup-operator

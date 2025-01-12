@@ -1,4 +1,5 @@
 mod classic_request_handling;
+mod espresso_transaction;
 mod outputs_merkle;
 use alloy_primitives::utils::{keccak256, Keccak256};
 use alloy_primitives::{FixedBytes, B256};
@@ -11,6 +12,8 @@ use classic_request_handling::{
     add_request_to_database, check_previously_handled_results, handle_database_request,
     query_request_with_the_highest_priority, query_result_from_database,
 };
+use committable::Committable;
+use espresso_transaction::EspressoTransaction;
 use futures::channel::oneshot::{channel, Sender};
 use futures::TryStreamExt;
 use hex::FromHexError;
@@ -76,7 +79,7 @@ async fn main() {
     sqlite_connect
         .execute(
             "CREATE TABLE IF NOT EXISTS preimages (
-            hash_type               INTEGER CHECK( hash_type IN (1, 2) ) NOT NULL,
+            hash_type               INTEGER CHECK( hash_type IN (1, 2, 3) ) NOT NULL,
             hash                    BLOB NOT NULL,
             created_at              INTEGER NOT NULL,
             storage_rent_paid_until INTEGER NOT NULL,
@@ -370,7 +373,7 @@ async fn main() {
                                 )
                                 .unwrap();
 
-                                let signature_hex = eigen_signer.sign(&keccak256_hash.as_slice());
+                                let signature_hex = eigen_signer.sign(&keccak256_hash);
 
                                 if reason == Some(YieldManualReason::Accepted) {
                                     json_response["finish_callback"] =
@@ -765,6 +768,16 @@ fn check_preimage_hash(
             ));
         }
     }
+    if hash_type == &(HashType::ESPRESSO_TX as u8) {
+        let espresso_transaction: EspressoTransaction = bincode::deserialize(&data)?;
+        if &espresso_transaction.commit().into_bits().into_vec() == hash {
+            return Ok(());
+        } else {
+            return Err(Box::<dyn std::error::Error>::from(
+                "espresso transaction of the data and the hash don't match",
+            ));
+        }
+    }
     return Err(Box::<dyn std::error::Error>::from(
         "sent hash type isn't supported",
     ));
@@ -811,7 +824,9 @@ fn upload_image_to_sqlite_db(
     pool: &Pool<SqliteConnectionManager>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !(preimage_data.0 == HashType::SHA256 as u8 || preimage_data.0 == HashType::KECCAK256 as u8)
+    if !(preimage_data.0 == HashType::SHA256 as u8
+        || preimage_data.0 == HashType::KECCAK256 as u8
+        || preimage_data.0 == HashType::ESPRESSO_TX as u8)
     {
         return Err(Box::<dyn std::error::Error>::from(
             "sent hash type isn't supported",
@@ -1030,4 +1045,5 @@ fn get_data_for_signing(
 enum HashType {
     SHA256 = 1,
     KECCAK256 = 2,
+    ESPRESSO_TX = 3,
 }
