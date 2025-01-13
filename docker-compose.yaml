@@ -47,6 +47,8 @@ services:
     volumes:
       - ./llama/models:/llama/models
     command: -m /llama/models/Phi-3-mini-4k-instruct-q4.gguf -c 2048
+    profiles:
+      - llm
     healthcheck:
      test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
      interval: 10s
