@@ -190,10 +190,11 @@ async fn main() {
                             return Ok::<_, Infallible>(err_response);
                         }
 
-                            let mut no_console_putchar = match req.headers().get("X-Console-Putchar") {
-                                Some(_) => false,
-                                None => true,
-                            };
+                            let mut no_console_putchar =
+                                match req.headers().get("X-Console-Putchar") {
+                                    Some(_) => false,
+                                    None => true,
+                                };
                             if std::env::var("ALWAYS_CONSOLE_PUTCHAR").is_ok() {
                                 no_console_putchar = false;
                             }

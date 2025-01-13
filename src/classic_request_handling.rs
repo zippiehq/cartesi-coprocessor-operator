@@ -4,6 +4,7 @@ use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
 use futures_channel::oneshot::Sender;
+use hyper::{body::to_bytes, Body, Client, Request};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
@@ -15,7 +16,14 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
-use std::vec;
+use std::{env::var, error::Error, vec};
+
+const GET_STORAGE_GIO: u32 = 0x27;
+const GET_CODE_GIO: u32 = 0x28;
+const GET_ACCOUNT_GIO: u32 = 0x29;
+const GET_IMAGE_GIO: u32 = 0x2a;
+const LLAMA_COMPLETION_GIO: u32 = 0x2b;
+
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
@@ -174,7 +182,7 @@ pub(crate) async fn handle_database_request(
 
 pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
-) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn std::error::Error>> {
+) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
         0 => false,
         1 => true,
@@ -187,38 +195,31 @@ pub(crate) async fn handle_classic(
     let mut reports_vector: Vec<(u16, Vec<u8>)> = Vec::new();
     let mut finish_result: (u16, Vec<u8>) = (0, vec![0]);
     let mut output_callback = |reason: u16, payload: &[u8]| {
-        let mut result: Result<(u16, Vec<u8>), Box<dyn std::error::Error>> =
-            Ok((reason, payload.to_vec()));
+        let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         outputs_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
 
     let mut report_callback = |reason: u16, payload: &[u8]| {
-        let mut result: Result<(u16, Vec<u8>), Box<dyn std::error::Error>> =
-            Ok((reason, payload.to_vec()));
+        let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         reports_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
     let mut finish_callback = |reason: u16, payload: &[u8]| {
-        let mut result: Result<(u16, Vec<u8>), Box<dyn std::error::Error>> =
-            Ok((reason, payload.to_vec()));
+        let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         finish_result = result.as_mut().unwrap().clone();
         return result;
     };
 
     let get_storage: Box<
-        dyn Fn(
-            u16,
-            Vec<u8>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error>>>>>,
+        dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
     > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
             let block_hash: [u8; 32] = input[0..32].try_into()?;
             let address: [u8; 20] = input[32..53].try_into()?;
             let storage_slot: [u8; 32] = input[53..86].try_into()?;
 
-            let ethereum_endpoint = std::env::var("ETHEREUM_ENDPOINT")
+            let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
                 .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
             let address = Address::from(address);
             let get_storage_request = ProviderBuilder::new()
@@ -229,22 +230,18 @@ pub(crate) async fn handle_classic(
                     &block_hash,
                 ))))
                 .await?;
-            let result: Result<Vec<u8>, Box<dyn std::error::Error>> = Ok(storage.to_be_bytes_vec());
+            let result: Result<Vec<u8>, Box<dyn Error>> = Ok(storage.to_be_bytes_vec());
             return result;
         })
     });
 
     let get_code: Box<
-        dyn Fn(
-            u16,
-            Vec<u8>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error>>>>>,
+        dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
     > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
             let block_hash: [u8; 32] = input[0..32].try_into()?;
             let address: [u8; 20] = input[32..53].try_into()?;
-            let ethereum_endpoint = std::env::var("ETHEREUM_ENDPOINT")
+            let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
                 .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
             let address = Address::from(address);
             let get_code_request = ProviderBuilder::new()
@@ -256,22 +253,18 @@ pub(crate) async fn handle_classic(
                 ))))
                 .await?;
 
-            let result: Result<Vec<u8>, Box<dyn std::error::Error>> = Ok(code_bytes.to_vec());
+            let result: Result<Vec<u8>, Box<dyn Error>> = Ok(code_bytes.to_vec());
             return result;
         })
     });
 
     let get_account: Box<
-        dyn Fn(
-            u16,
-            Vec<u8>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn std::error::Error>>>>>,
+        dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
     > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
             let block_hash: [u8; 32] = input[0..32].try_into()?;
             let address: [u8; 20] = input[32..53].try_into()?;
-            let ethereum_endpoint = std::env::var("ETHEREUM_ENDPOINT")
+            let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
                 .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
             let address = Address::from(address);
             let get_account_request = ProviderBuilder::new()
@@ -283,7 +276,7 @@ pub(crate) async fn handle_classic(
                 ))))
                 .await?;
 
-            let result: Result<Vec<u8>, Box<dyn std::error::Error>> = Ok([
+            let result: Result<Vec<u8>, Box<dyn Error>> = Ok([
                 account.balance.to_be_bytes_vec(),
                 account.nonce.to_be_bytes().to_vec(),
             ]
@@ -292,12 +285,10 @@ pub(crate) async fn handle_classic(
         })
     });
 
-    let get_preimage = |reason: u16,
-                        mut input: Vec<u8>|
-     -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let get_preimage = |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
         let hash_type = input.remove(0);
         let data = input;
-        let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
+        let db_directory = var("DB_DIRECTORY").unwrap_or(String::from(""));
         let sqlite_connection = Connection::open(&Path::new(&db_directory).join("requests.db"))?;
         let mut statement = sqlite_connection
             .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ?;")?;
@@ -308,15 +299,51 @@ pub(crate) async fn handle_classic(
             // Query data from the database and return it
             return Ok(statement.get::<_, Vec<u8>>(4)?);
         }
-        return Err(Box::<dyn std::error::Error>::from(
+        return Err(Box::<dyn Error>::from(
             "No data found with such hash and hash type",
         ));
     };
+
+    let completion: Box<
+        dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
+    > = Box::new(|reason: u16, input: Vec<u8>| {
+        Box::pin(async move {
+            if input.len() > 0x100000 {
+                return Err(Box::<dyn Error>::from(
+                    "Input shouldn't be larger than 1 mb.",
+                ));
+            }
+            let llama_server_address = var("LLAMA_SERVER")?;
+            let completion_http_request = Request::builder()
+                .method("POST")
+                .uri(format!("{}/completion", llama_server_address))
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::from_slice::<String>(&input)?))
+                .unwrap();
+
+            let http_client = Client::new();
+
+            match http_client.request(completion_http_request).await {
+                Ok(completion_response) => {
+                    return Ok(to_bytes(completion_response.into_body()).await?.to_vec());
+                }
+                Err(e) => {
+                    return Err(Box::<dyn Error>::from(format!(
+                        "Error querying completion request: {:?}",
+                        e
+                    )));
+                }
+            }
+        })
+    });
+
     let mut callbacks = HashMap::new();
-    callbacks.insert(0x27, Callback::Async(get_storage));
-    callbacks.insert(0x28, Callback::Async(get_code));
-    callbacks.insert(0x29, Callback::Async(get_account));
-    callbacks.insert(0x2a, Callback::Sync(Box::new(get_preimage)));
+    callbacks.insert(GET_STORAGE_GIO, Callback::Async(get_storage));
+    callbacks.insert(GET_CODE_GIO, Callback::Async(get_code));
+    callbacks.insert(GET_ACCOUNT_GIO, Callback::Async(get_account));
+    callbacks.insert(GET_IMAGE_GIO, Callback::Sync(Box::new(get_preimage)));
+    callbacks.insert(LLAMA_COMPLETION_GIO, Callback::Async(completion));
+
     let reason = run_advance(
         classic_request.machine_snapshot_path.clone(),
         None,

@@ -15,6 +15,7 @@ services:
     environment:
       - DB_DIRECTORY=/db
       - SNAPSHOT_DIR=/snapshots
+      - LLAMA_SERVER=http://llama-server:8080
     ports:
       - "4001:4001/udp"
       - "4001:4001/tcp"
@@ -25,6 +26,9 @@ services:
       - ./operator1-ipfs:/data
       - ./operator1-snapshots:/snapshots
       - ./operator1-db:/db
+    depends_on:
+      llama-server:
+        condition: service_healthy
     networks:
       - coprocessor-network
     cap_drop:
@@ -34,3 +38,17 @@ services:
       interval: 10s
       retries: 200
       start_period: 15s
+
+  llama-server:
+    image: ghcr.io/ggerganov/llama.cpp:server
+    container_name: llama-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./llama/models:/llama/models
+    command: -m /llama/models/Phi-3-mini-4k-instruct-q4.gguf -c 2048
+    healthcheck:
+     test: ["CMD", "curl", "-f", "http://127.0.0.1:8080/health"]
+     interval: 10s
+     retries: 200
+     start_period: 10s
