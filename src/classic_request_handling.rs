@@ -1,5 +1,7 @@
+use crate::upload_image_to_sqlite_db;
 use advance_runner::YieldManualReason;
 use advance_runner::{run_advance, Callback};
+use alloy_primitives::Keccak256;
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
@@ -9,7 +11,6 @@ use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
 use rusqlite::params;
-use rusqlite::Connection;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -23,7 +24,7 @@ const GET_CODE_GIO: u32 = 0x28;
 const GET_ACCOUNT_GIO: u32 = 0x29;
 const GET_IMAGE_GIO: u32 = 0x2a;
 const LLAMA_COMPLETION_GIO: u32 = 0x2b;
-
+const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
@@ -285,23 +286,29 @@ pub(crate) async fn handle_classic(
         })
     });
 
-    let get_preimage = |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
-        let hash_type = input.remove(0);
-        let data = input;
-        let db_directory = var("DB_DIRECTORY").unwrap_or(String::from(""));
-        let sqlite_connection = Connection::open(&Path::new(&db_directory).join("requests.db"))?;
-        let mut statement = sqlite_connection
-            .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ?;")?;
+    let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
+    let manager = SqliteConnectionManager::file(Path::new(&db_directory).join("requests.db"));
+    let pool = r2d2::Pool::new(manager).unwrap();
 
-        let mut rows = statement.query(params![hash_type, data])?;
+    let get_preimage = {
+        let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
+        move |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
+            let sqlite_connection = pool.get()?;
+            let hash_type = input.remove(0);
+            let data = input;
+            let mut statement = sqlite_connection
+                .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ?;")?;
 
-        if let Some(statement) = rows.next()? {
-            // Query data from the database and return it
-            return Ok(statement.get::<_, Vec<u8>>(4)?);
+            let mut rows = statement.query(params![hash_type, data])?;
+
+            if let Some(statement) = rows.next()? {
+                // Query data from the database and return it
+                return Ok(statement.get::<_, Vec<u8>>(4)?);
+            }
+            return Err(Box::<dyn Error>::from(
+                "No data found with such hash and hash type",
+            ));
         }
-        return Err(Box::<dyn Error>::from(
-            "No data found with such hash and hash type",
-        ));
     };
 
     let completion: Box<
@@ -337,12 +344,36 @@ pub(crate) async fn handle_classic(
         })
     });
 
+    let put_image_keccak256 = {
+        let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
+        move |reason: u16, input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
+            if input.len() > (256 * 1024) {
+                return Err(Box::<dyn Error>::from("The input is too big"));
+            }
+
+            let preimage_hash = {
+                let mut hasher = Keccak256::new();
+                hasher.update(&input);
+                hasher.finalize().to_vec()
+            };
+
+            let preimage = (2, preimage_hash, input);
+
+            upload_image_to_sqlite_db(&pool, &preimage)?;
+            return Ok(vec![]);
+        }
+    };
+
     let mut callbacks = HashMap::new();
     callbacks.insert(GET_STORAGE_GIO, Callback::Async(get_storage));
     callbacks.insert(GET_CODE_GIO, Callback::Async(get_code));
     callbacks.insert(GET_ACCOUNT_GIO, Callback::Async(get_account));
     callbacks.insert(GET_IMAGE_GIO, Callback::Sync(Box::new(get_preimage)));
     callbacks.insert(LLAMA_COMPLETION_GIO, Callback::Async(completion));
+    callbacks.insert(
+        PUT_IMAGE_KECCAK256_GIO,
+        Callback::Sync(Box::new(put_image_keccak256)),
+    );
 
     let reason = run_advance(
         classic_request.machine_snapshot_path.clone(),

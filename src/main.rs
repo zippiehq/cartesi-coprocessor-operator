@@ -520,6 +520,40 @@ async fn main() {
 
                             return Ok::<_, Infallible>(response);
                         }
+                        (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
+                            let sqlite_connection = pool.get().unwrap();
+
+                            let mut statement = sqlite_connection
+                                .prepare(
+                                    "SELECT data FROM preimages WHERE hash_type = ? AND hash = ?;",
+                                )
+                                .unwrap();
+                            let mut rows = statement
+                                .query(params![hash_type, hex::decode(hash).unwrap()])
+                                .unwrap();
+
+                            if let Some(statement) = rows.next().unwrap() {
+                                // Query data from the database and encode it to cbor
+                                let preimage_data = statement.get::<_, Vec<u8>>(0).unwrap();
+                                let response = Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(Body::from(preimage_data))
+                                    .unwrap();
+
+                                return Ok::<_, Infallible>(response);
+                            }
+                            let json_error = serde_json::json!({
+                                "error": "Preimage wasn't found",
+                            });
+                            let json_error = serde_json::to_string(&json_error).unwrap();
+
+                            let response = Response::builder()
+                                .status(StatusCode::NOT_FOUND)
+                                .body(Body::from(json_error))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
                         (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                             // Check machine_hash format
                             if let Err(err_response) = check_hash_format(
