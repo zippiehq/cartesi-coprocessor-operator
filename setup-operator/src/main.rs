@@ -25,10 +25,8 @@ async fn main() {
     let opt = Options::parse();
     let signer = PrivateKeySigner::from_str(&opt.operator_private_key).unwrap();
 
-    let deployment_parameters_devnet = File::open(Path::new(
-        &opt.chain_writer_reader_addresses,
-    ))
-    .unwrap();
+    let deployment_parameters_devnet =
+        File::open(Path::new(&opt.chain_writer_reader_addresses)).unwrap();
 
     let json: serde_json::Value = serde_json::from_reader(deployment_parameters_devnet).unwrap();
 
@@ -38,23 +36,17 @@ async fn main() {
     )
     .unwrap();
 
-    let avs_directory_address = Address::parse_checksummed(
-        json.get("avsDirectory").unwrap().as_str().unwrap(),
-        None,
-    )
-    .unwrap();
+    let avs_directory_address =
+        Address::parse_checksummed(json.get("avsDirectory").unwrap().as_str().unwrap(), None)
+            .unwrap();
 
-    let strategy_manager_address = Address::parse_checksummed(
-        json.get("strategyManager").unwrap().as_str().unwrap(),
-        None,
-    )
-    .unwrap();
+    let strategy_manager_address =
+        Address::parse_checksummed(json.get("strategyManager").unwrap().as_str().unwrap(), None)
+            .unwrap();
 
-    let rewards_coordinator_address = Address::parse_checksummed(
-        json.get("avsDirectory").unwrap().as_str().unwrap(),
-        None,
-    )
-    .unwrap();
+    let rewards_coordinator_address =
+        Address::parse_checksummed(json.get("avsDirectory").unwrap().as_str().unwrap(), None)
+            .unwrap();
 
     let el_chain_reader = ELChainReader::new(
         get_test_logger(),
@@ -86,65 +78,36 @@ async fn main() {
         .await
         .unwrap();
     */
-    
-    let tokens = el_chain_reader
-        .get_strategy_and_underlying_erc20_token(
-            Address::parse_checksummed(opt.strategy_deposit_address.clone(), None).unwrap(),
-        )
-        .await
-        .unwrap();
-    let (_, underlying_token_contract, underlying_token) = tokens;
 
     let provider = get_signer(
         &opt.operator_private_key.to_string(),
         &opt.http_endpoint.to_string(),
     );
-    let contract_underlying_token = ERC20::new(underlying_token_contract, &provider);
 
-    let contract_call = contract_underlying_token.approve(
-        strategy_manager_address,
-        U256::from(opt.strategy_deposit_amount),
-    );
-    
-    
-    let approve_tx: FixedBytes<32> = contract_call.send().await.unwrap().watch().await.unwrap();
-    wait_transaction(&opt.http_endpoint, approve_tx).await.unwrap();
-    
-    let contract_strategy_manager = StrategyManager::new(strategy_manager_address, &provider);
+    let coprocessor_deployment_output_devnet =
+        File::open(Path::new(&opt.avs_registry_writer_addresses)).unwrap();
 
-    let deposit_contract_call = contract_strategy_manager.depositIntoStrategy(
-        Address::parse_checksummed(opt.strategy_deposit_address, None).unwrap(),
-        underlying_token,
-        U256::from(opt.strategy_deposit_amount),
-    );
-    println!("{:?}", deposit_contract_call.calldata());
-
-    let tx: FixedBytes<32> = deposit_contract_call
-        .send()
-        .await
-        .unwrap()
-        .with_required_confirmations(2)
-        .watch()
-        .await
-        .unwrap();
-
-    wait_transaction(&opt.http_endpoint, tx).await.unwrap();
-
-    let coprocessor_deployment_output_devnet = File::open(Path::new(
-        &opt.avs_registry_writer_addresses,
-    ))
-    .unwrap();
-
-    let json: serde_json::Value = serde_json::from_reader(coprocessor_deployment_output_devnet).unwrap();
+    let json: serde_json::Value =
+        serde_json::from_reader(coprocessor_deployment_output_devnet).unwrap();
 
     let registry_coordinator = Address::parse_checksummed(
-        json.get("addresses").unwrap().get("registryCoordinator").unwrap().as_str().unwrap(),
+        json.get("addresses")
+            .unwrap()
+            .get("registryCoordinator")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         None,
     )
     .unwrap();
 
     let operator_state_retriever = Address::parse_checksummed(
-        json.get("addresses").unwrap().get("operatorStateRetriever").unwrap().as_str().unwrap(),
+        json.get("addresses")
+            .unwrap()
+            .get("operatorStateRetriever")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         None,
     )
     .unwrap();
