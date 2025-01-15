@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-cert
 COPY --from=builder /operator/target/release/cartesi-coprocessor-operator /operator/cartesi-coprocessor-operator
 COPY --from=builder /setup-operator/target/release/setup-operator /operator/setup-operator
 
+RUN curl -L https://foundry.paradigm.xyz | bash
 ARG TARGETARCH
 RUN curl -LO https://github.com/ipfs/kubo/releases/download/v0.30.0/kubo_v0.30.0_linux-$TARGETARCH.tar.gz
 RUN tar -xvzf kubo_v0.30.0_linux-$TARGETARCH.tar.gz
