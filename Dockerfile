@@ -20,7 +20,7 @@ WORKDIR /setup-operator
 RUN cargo build --release --bin setup-operator
 
 FROM debian:bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates curl netcat-traditional 
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates curl netcat-traditional git
 COPY --from=builder /operator/target/release/cartesi-coprocessor-operator /operator/cartesi-coprocessor-operator
 COPY --from=builder /setup-operator/target/release/setup-operator /operator/setup-operator
 
