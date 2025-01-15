@@ -122,7 +122,7 @@ async fn main() {
     .unwrap();
 
     let bls_key_pair = BlsKeyPair::new(opt.operator_bls_key.to_string()).unwrap();
-    let salt: FixedBytes<32> = FixedBytes::from([0x02; 32]);
+    let salt: FixedBytes<32> = FixedBytes::from([0x03; 32]);
     let now = SystemTime::now();
     let seconds_since_epoch = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
     let expiry = U256::from(seconds_since_epoch) + U256::from(10000);
