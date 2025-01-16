@@ -16,6 +16,8 @@ services:
       - DB_DIRECTORY=/db
       - SNAPSHOT_DIR=/snapshots
       - LLAMA_SERVER=http://llama-server:8080
+      - OPERATOR_ADDRESS=http://0.0.0.0:3033
+      - MACHINE_HASH=ed62de75482451ae6c013b00466d5c52648c38f2e4efa383b5a2cc31864e5fe2
     ports:
       - "4001:4001/udp"
       - "4001:4001/tcp"

@@ -12,6 +12,10 @@ COPY /Cargo.lock /operator/Cargo.lock
 WORKDIR /setup-operator
 COPY /setup-operator /setup-operator
 
+WORKDIR /requests-test
+COPY /requests-test /requests-test
+RUN cargo build --release
+
 WORKDIR /operator
 RUN git config --global url."https://github.com/".insteadOf git@github.com:
 RUN CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --features bls_signing
@@ -23,6 +27,7 @@ FROM debian:bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends libssl3 ca-certificates curl netcat-traditional git
 COPY --from=builder /operator/target/release/cartesi-coprocessor-operator /operator/cartesi-coprocessor-operator
 COPY --from=builder /setup-operator/target/release/setup-operator /operator/setup-operator
+COPY --from=builder /requests-test/target/release/requests-test /operator/requests-test
 
 RUN curl -L https://foundry.paradigm.xyz | bash
 ARG TARGETARCH
