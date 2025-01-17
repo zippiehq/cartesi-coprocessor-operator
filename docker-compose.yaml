@@ -1,3 +1,4 @@
+
 networks:
   coprocessor-network:
     name: coprocessor-network
@@ -28,9 +29,6 @@ services:
       - ./operator1-ipfs:/data
       - ./operator1-snapshots:/snapshots
       - ./operator1-db:/db
-    depends_on:
-      llama-server:
-        condition: service_healthy
     networks:
       - coprocessor-network
     cap_drop:
@@ -44,8 +42,6 @@ services:
   llama-server:
     image: ghcr.io/ggerganov/llama.cpp:server
     container_name: llama-server
-    ports:
-      - "8080:8080"
     volumes:
       - ./llama/models:/llama/models
     command: -m /llama/models/Phi-3-mini-4k-instruct-q4.gguf -c 2048

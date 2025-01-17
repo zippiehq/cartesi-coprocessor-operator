@@ -320,6 +320,7 @@ pub(crate) async fn handle_classic(
                     "Input shouldn't be larger than 1 mb.",
                 ));
             }
+            println!("completition input {:?}", input.clone());
             let llama_server_address = var("LLAMA_SERVER")?;
             let completion_http_request = Request::builder()
                 .method("POST")
