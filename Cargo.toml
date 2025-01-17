@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-std = { version = "1", features = ["attributes", "tokio1"] }
-advance_runner = {git = "https://github.com/zippiehq/cartesi-advance-runner", rev = "b9dc07033cf46b109033295101e6cf9ef4ae30b7"}
+advance_runner = {git = "https://github.com/zippiehq/cartesi-advance-runner", rev = "3da5d2cf4f0aec424a9ce75946a1ef09e4078848"}
 hyper = { version = "0.14", features = ["full"] }
 hex = "0.4"
 serde_json = "1.0.132"
