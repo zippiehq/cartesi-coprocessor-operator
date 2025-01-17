@@ -326,7 +326,7 @@ pub(crate) async fn handle_classic(
                 .method("POST")
                 .uri(format!("{}/completion", llama_server_address))
                 .header("Content-Type", "application/json")
-                .body(Body::from(serde_json::from_slice::<String>(&input)?))
+                .body(Body::from(input))
                 .unwrap();
 
             let http_client = Client::new();
