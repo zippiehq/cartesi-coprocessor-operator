@@ -152,12 +152,8 @@ async fn main() {
                         let sqlite_connection = pool.get().unwrap();
 
                         async_std::task::block_on(async {
-                            handle_database_request(
-                                sqlite_connection,
-                                &classic_request,
-                                requests.clone(),
-                            )
-                            .await;
+                            handle_database_request(&pool, &classic_request, requests.clone())
+                                .await;
                         });
                         *number_of_active_threads.lock().unwrap() -= 1;
                         cvar.notify_one();
