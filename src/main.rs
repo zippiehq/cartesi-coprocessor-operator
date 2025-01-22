@@ -58,10 +58,9 @@ async fn main() {
     let new_record = Arc::new((Mutex::new(false), Condvar::new()));
 
     let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
-    let manager = SqliteConnectionManager::file(Path::new(&db_directory).join("requests.db"));
-    let pool = r2d2::Pool::new(manager).unwrap();
+    let sqlite_connect =
+        rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap();
 
-    let sqlite_connect = pool.get().unwrap();
     // Create table for requests
     sqlite_connect
         .execute(
@@ -118,17 +117,17 @@ async fn main() {
 
     thread::spawn({
         let requests = requests.clone();
-        let pool = pool.clone();
         let new_record = new_record.clone();
 
         move || {
             let requests = requests.clone();
-            let pool = pool.clone();
             let new_record = new_record.clone();
 
             loop {
-                let pool = pool.clone();
-                let sqlite_connection = Arc::new(Mutex::new(pool.get().unwrap()));
+                let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
+                let sqlite_connection =
+                Arc::new(Mutex::new(rusqlite::Connection::open(Path::new(&db_directory).join("requests.db"))
+                        .unwrap()));
                 // Query one record from the DB (choose the one, with the highest priority)
                 let classic_request = query_request_with_the_highest_priority(
                     sqlite_connection.clone(),
@@ -167,8 +166,9 @@ async fn main() {
             }
         }
     });
-    let sqlite_connection = Arc::new(Mutex::new(pool.get().unwrap()));
-
+    let sqlite_connection =
+    Arc::new(Mutex::new(rusqlite::Connection::open(Path::new(&db_directory).join("requests.db"))
+            .unwrap()));
     let service = make_service_fn(|_| {
         let requests = requests.clone();
         let sqlite_connection = sqlite_connection.clone();
@@ -822,7 +822,7 @@ fn check_preimage_hash(
 }
 
 fn preimage_available(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     hash_type_and_data: &(u8, Vec<u8>),
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let sqlite_connection = sqlite_connection.lock().unwrap();
@@ -841,7 +841,7 @@ fn preimage_available(
     }
 }
 fn record_exists(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> bool {
     let sqlite_connection = sqlite_connection.lock().unwrap();
@@ -859,7 +859,7 @@ fn record_exists(
     return false;
 }
 fn upload_image_to_sqlite_db(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !(preimage_data.0 == HashType::SHA256 as u8

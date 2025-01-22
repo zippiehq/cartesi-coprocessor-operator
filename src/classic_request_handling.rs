@@ -26,7 +26,7 @@ const GET_IMAGE_GIO: u32 = 0x2a;
 const LLAMA_COMPLETION_GIO: u32 = 0x2b;
 const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
 pub(crate) fn add_request_to_database(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
     sender: Sender<i64>,
     machine_snapshot_path: &Path,
@@ -46,7 +46,7 @@ pub(crate) fn add_request_to_database(
     requests.insert(id, sender);
 }
 pub(crate) fn check_previously_handled_results(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     machine_snapshot_path: &Path,
     payload: &Vec<u8>,
     no_console_putchar: &bool,
@@ -86,7 +86,7 @@ pub(crate) fn check_previously_handled_results(
 }
 
 pub(crate) fn query_result_from_database(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     id: &i64,
     outputs_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
     reports_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
@@ -115,7 +115,7 @@ pub(crate) fn query_result_from_database(
 }
 
 pub(crate) fn query_request_with_the_highest_priority(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     new_record: Arc<(Mutex<bool>, Condvar)>,
 ) -> ClassicRequest {
     let sqlite_connection = sqlite_connection.lock().unwrap();
@@ -160,7 +160,7 @@ pub(crate) fn query_request_with_the_highest_priority(
 }
 
 pub(crate) async fn handle_database_request(
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
@@ -188,7 +188,7 @@ let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
 
 pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
-    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
+    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
         0 => false,
