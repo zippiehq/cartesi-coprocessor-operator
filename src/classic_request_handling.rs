@@ -292,10 +292,6 @@ pub(crate) async fn handle_classic(
         })
     });
 
-    let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
-    let manager = SqliteConnectionManager::file(Path::new(&db_directory).join("requests.db"));
-    let pool = r2d2::Pool::new(manager).unwrap();
-
     let get_preimage = {
         let sqlite_connection = sqlite_connection.clone();
         move |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
