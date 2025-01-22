@@ -23,6 +23,7 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use ipfs_api_backend_hyper::IpfsApi;
 use r2d2::Pool;
+use r2d2::PooledConnection;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
 use serde::{Deserialize, Serialize};
@@ -117,7 +118,7 @@ async fn main() {
 
     thread::spawn({
         let requests = requests.clone();
-        let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
+        let pool = pool.clone();
         let new_record = new_record.clone();
 
         move || {
@@ -126,11 +127,13 @@ async fn main() {
             let new_record = new_record.clone();
 
             loop {
-                let sqlite_connection = pool.get().unwrap();
+                let pool = pool.clone();
+                let sqlite_connection = Arc::new(Mutex::new(pool.get().unwrap()));
                 // Query one record from the DB (choose the one, with the highest priority)
-
-                let classic_request =
-                    query_request_with_the_highest_priority(sqlite_connection, new_record.clone());
+                let classic_request = query_request_with_the_highest_priority(
+                    sqlite_connection.clone(),
+                    new_record.clone(),
+                );
 
                 let (number_of_active_threads, cvar) = &*thread_count;
 
@@ -143,17 +146,15 @@ async fn main() {
 
                 thread::spawn({
                     let requests = requests.clone();
-                    let pool = pool.clone();
                     let thread_count = thread_count.clone();
+                    let sqlite_connection = sqlite_connection.clone();
                     move || {
                         let (number_of_active_threads, cvar) = &*thread_count;
 
                         // Handle request and write the result into DB
-                        let sqlite_connection = pool.get().unwrap();
-
                         async_std::task::block_on(async {
                             handle_database_request(
-                                sqlite_connection,
+                                sqlite_connection.clone(),
                                 &classic_request,
                                 requests.clone(),
                             )
@@ -166,16 +167,17 @@ async fn main() {
             }
         }
     });
+    let sqlite_connection = Arc::new(Mutex::new(pool.get().unwrap()));
 
     let service = make_service_fn(|_| {
         let requests = requests.clone();
-        let pool = pool.clone();
+        let sqlite_connection = sqlite_connection.clone();
         let new_record = new_record.clone();
 
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let requests = requests.clone();
-                let pool = pool.clone();
+                let sqlite_connection = sqlite_connection.clone();
                 let new_record = new_record.clone();
                 async move {
                     let path = req.uri().path().to_owned();
@@ -256,9 +258,8 @@ async fn main() {
                             let mut finish_result: Option<(u16, Vec<u8>)> = None;
                             let mut reason: Option<advance_runner::YieldManualReason> = None;
                             {
-                                let sqlite_connection = pool.get().unwrap();
                                 check_previously_handled_results(
-                                    sqlite_connection,
+                                    sqlite_connection.clone(),
                                     &machine_snapshot_path,
                                     &payload,
                                     &no_console_putchar,
@@ -277,9 +278,8 @@ async fn main() {
                                 println!("this request hasn't been handled yet");
                                 let (sender, receiver) = channel::<i64>();
                                 {
-                                    let sqlite_connection = pool.get().unwrap();
                                     add_request_to_database(
-                                        sqlite_connection,
+                                        sqlite_connection.clone(),
                                         requests,
                                         sender,
                                         &machine_snapshot_path,
@@ -298,9 +298,8 @@ async fn main() {
                                 {
                                     // Wait for request to be handled
                                     let id = receiver.await.unwrap();
-                                    let sqlite_connection = pool.get().unwrap();
                                     query_result_from_database(
-                                        sqlite_connection,
+                                        sqlite_connection.clone(),
                                         &id,
                                         &mut outputs_vector,
                                         &mut reports_vector,
@@ -426,17 +425,18 @@ async fn main() {
                                     continue;
                                 }
 
-                                let availability_response =
-                                    match preimage_available(&pool, &preimage_hash_type_and_hash) {
-                                        Ok(true) => "available",
-                                        Ok(false) => "unavailable",
-                                        Err(e) => {
-                                            json_response
-                                                [hex::encode(preimage_hash_type_and_hash.1)] =
-                                                serde_json::json!(e.to_string());
-                                            continue;
-                                        }
-                                    };
+                                let availability_response = match preimage_available(
+                                    sqlite_connection.clone(),
+                                    &preimage_hash_type_and_hash,
+                                ) {
+                                    Ok(true) => "available",
+                                    Ok(false) => "unavailable",
+                                    Err(e) => {
+                                        json_response[hex::encode(preimage_hash_type_and_hash.1)] =
+                                            serde_json::json!(e.to_string());
+                                        continue;
+                                    }
+                                };
                                 let data = vec![(
                                     &preimage_hash_type_and_hash.0,
                                     &preimage_hash_type_and_hash.1,
@@ -490,7 +490,7 @@ async fn main() {
                                     continue;
                                 }
 
-                                if record_exists(&pool, &preimage) {
+                                if record_exists(sqlite_connection.clone(), &preimage) {
                                     json_response[hex::encode(preimage.1)] = serde_json::json!(
                                         "the record already exists in the database"
                                     );
@@ -503,7 +503,9 @@ async fn main() {
                                         serde_json::json!(e.to_string());
                                     continue;
                                 }
-                                if let Err(e) = upload_image_to_sqlite_db(&pool, &preimage) {
+                                if let Err(e) =
+                                    upload_image_to_sqlite_db(sqlite_connection.clone(), &preimage)
+                                {
                                     json_response[hex::encode(preimage.1)] =
                                         serde_json::json!(e.to_string());
                                     continue;
@@ -521,7 +523,8 @@ async fn main() {
                             return Ok::<_, Infallible>(response);
                         }
                         (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
-                            let sqlite_connection = pool.get().unwrap();
+                            let sqlite_connection = sqlite_connection.clone();
+                            let sqlite_connection = sqlite_connection.lock().unwrap();
 
                             let mut statement = sqlite_connection
                                 .prepare(
@@ -819,10 +822,10 @@ fn check_preimage_hash(
 }
 
 fn preimage_available(
-    pool: &Pool<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     hash_type_and_data: &(u8, Vec<u8>),
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let sqlite_connection = pool.get()?;
+    let sqlite_connection = sqlite_connection.lock().unwrap();
 
     let mut statement = sqlite_connection.prepare(
         "SELECT storage_rent_paid_until FROM preimages WHERE hash_type = ? AND hash = ?;",
@@ -838,10 +841,10 @@ fn preimage_available(
     }
 }
 fn record_exists(
-    pool: &Pool<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> bool {
-    let sqlite_connection = pool.get().unwrap();
+    let sqlite_connection = sqlite_connection.lock().unwrap();
 
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ? AND data = ?;")
@@ -856,7 +859,7 @@ fn record_exists(
     return false;
 }
 fn upload_image_to_sqlite_db(
-    pool: &Pool<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !(preimage_data.0 == HashType::SHA256 as u8
@@ -870,9 +873,7 @@ fn upload_image_to_sqlite_db(
     let created_at = Utc::now();
     let storage_rent_paid_until = created_at + chrono::Duration::days(365);
 
-    let sqlite_connection = pool.get()?;
-
-    sqlite_connection.execute(
+    sqlite_connection.lock().unwrap().execute(
         "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data) 
                                VALUES (?, ?, ?, ?, ?)",
         params![

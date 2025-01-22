@@ -26,7 +26,7 @@ const GET_IMAGE_GIO: u32 = 0x2a;
 const LLAMA_COMPLETION_GIO: u32 = 0x2b;
 const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
 pub(crate) fn add_request_to_database(
-    sqlite_connection: PooledConnection<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
     sender: Sender<i64>,
     machine_snapshot_path: &Path,
@@ -39,13 +39,14 @@ pub(crate) fn add_request_to_database(
         false => 0,
     };
     // Write down new request to the DB
-    let id: i64  = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)
+
+    let id: i64  =  sqlite_connection.lock().unwrap().query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)
 ).unwrap();
     let mut requests = requests.lock().unwrap();
     requests.insert(id, sender);
 }
 pub(crate) fn check_previously_handled_results(
-    sqlite_connection: PooledConnection<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     machine_snapshot_path: &Path,
     payload: &Vec<u8>,
     no_console_putchar: &bool,
@@ -55,6 +56,7 @@ pub(crate) fn check_previously_handled_results(
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) {
+    let sqlite_connection = sqlite_connection.lock().unwrap();
     let mut statement = sqlite_connection
     .prepare(
         "SELECT * FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ?;",
@@ -84,13 +86,14 @@ pub(crate) fn check_previously_handled_results(
 }
 
 pub(crate) fn query_result_from_database(
-    sqlite_connection: PooledConnection<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     id: &i64,
     outputs_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
     reports_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) {
+    let sqlite_connection = sqlite_connection.lock().unwrap();
     // Query the result from the DB
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
@@ -112,9 +115,10 @@ pub(crate) fn query_result_from_database(
 }
 
 pub(crate) fn query_request_with_the_highest_priority(
-    sqlite_connection: PooledConnection<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     new_record: Arc<(Mutex<bool>, Condvar)>,
 ) -> ClassicRequest {
+    let sqlite_connection = sqlite_connection.lock().unwrap();
     let mut statement = sqlite_connection
         .prepare(
             "WITH highest_priority_row AS (
@@ -156,21 +160,22 @@ pub(crate) fn query_request_with_the_highest_priority(
 }
 
 pub(crate) async fn handle_database_request(
-    sqlite_connection: PooledConnection<SqliteConnectionManager>,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
-    let response = handle_classic(classic_request).await.unwrap();
+    let response = handle_classic(classic_request, sqlite_connection.clone())
+        .await
+        .unwrap();
 
     let reason = match response.1 {
         YieldManualReason::Accepted => 1,
         YieldManualReason::Rejected => 2,
         YieldManualReason::Exception => 4,
     };
-
-    sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority])
+    sqlite_connection.lock().unwrap().execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority])
 .unwrap();
-    let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
+let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
         requests.lock().unwrap();
     match requests.remove(&classic_request.id) {
         Some(sender) => {
@@ -183,6 +188,7 @@ pub(crate) async fn handle_database_request(
 
 pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
+    sqlite_connection: Arc<Mutex<PooledConnection<SqliteConnectionManager>>>,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
         0 => false,
@@ -291,11 +297,11 @@ pub(crate) async fn handle_classic(
     let pool = r2d2::Pool::new(manager).unwrap();
 
     let get_preimage = {
-        let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
+        let sqlite_connection = sqlite_connection.clone();
         move |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
-            let sqlite_connection = pool.get()?;
             let hash_type = input.remove(0);
             let data = input;
+            let sqlite_connection = sqlite_connection.lock().unwrap();
             let mut statement = sqlite_connection
                 .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ?;")?;
 
@@ -346,7 +352,7 @@ pub(crate) async fn handle_classic(
     });
 
     let put_image_keccak256 = {
-        let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
+        let sqlite_connection = sqlite_connection.clone();
         move |reason: u16, input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
             if input.len() > (256 * 1024) {
                 return Err(Box::<dyn Error>::from("The input is too big"));
@@ -360,7 +366,7 @@ pub(crate) async fn handle_classic(
 
             let preimage = (2, preimage_hash, input);
 
-            upload_image_to_sqlite_db(&pool, &preimage)?;
+            upload_image_to_sqlite_db(sqlite_connection.clone(), &preimage)?;
             return Ok(vec![]);
         }
     };
