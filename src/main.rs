@@ -746,6 +746,123 @@ async fn main() {
                                 }
                             }
                         }
+
+                        // ???
+
+                        (hyper::Method::POST, ["upload"]) => {
+                            let whole_body = hyper::body::to_bytes(req.into_body()).await.unwrap();
+                            let upload_params: UploadParams = match serde_json::from_slice(&whole_body) {
+                                Ok(params) => params,
+                                Err(e) => {
+                                    let json_error = serde_json::json!({
+                                        "error": format!("Invalid JSON: {}", e),
+                                    });
+                                    let json_error = serde_json::to_string(&json_error).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .body(Body::from(json_error))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            };
+
+                            let upload_id = upload_params.id.clone();
+                            let url = upload_params.url.clone();
+
+                            if let Err(err_response) = check_hash_format(
+                                &upload_id,
+                                "upload_id should contain only symbols a-f 0-9 and have length 64",
+                            ) {
+                                return Ok::<_, Infallible>(err_response);
+                            }
+
+                            //let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap_or_else(|_| "snapshots".to_string());
+                            let upload_dir = Path::new(&snapshot_dir).join(&upload_id);
+                            let lock_file_path = upload_dir.with_extension("lock");
+
+                            if upload_dir.exists() {
+                                if lock_file_path.exists() {
+                                    let json_response = serde_json::json!({
+                                        "state": "upload_in_progress",
+                                    });
+                                    let json_response = serde_json::to_string(&json_response).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(json_response))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                } else {
+                                    let json_response = serde_json::json!({
+                                        "state": "upload_completed",
+                                    });
+                                    let json_response = serde_json::to_string(&json_response).unwrap();
+                                    let response = Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Body::from(json_response))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                            } else {
+                                match StdOpenOptions::new()
+                                    .read(true)
+                                    .write(true)
+                                    .create_new(true)
+                                    .open(&lock_file_path)
+                                {
+                                    Ok(_) => {
+                                        let lock_file_path_clone = lock_file_path.clone();
+                                        let upload_dir_clone = upload_dir.clone();
+                                        let url_clone = url.clone();
+                                        let upload_id_clone = upload_id.clone();
+
+                                        async_std::task::spawn(async move {
+                                            if let Err(err) = download_file(&url_clone, &upload_dir_clone).await {
+                                                eprintln!("Failed to download file {}: {}", url_clone, err);
+                                                let _ = std::fs::remove_dir_all(&upload_dir_clone);
+                                                let _ = std::fs::remove_file(&lock_file_path_clone);
+                                                return;
+                                            }
+
+                                            let _ = std::fs::remove_file(&lock_file_path_clone);
+                                            println!("Upload {} completed successfully", upload_id_clone);
+                                        });
+
+                                        let json_response = serde_json::json!({
+                                            "state": "upload_started",
+                                        });
+                                        let json_response = serde_json::to_string(&json_response).unwrap();
+                                        let response = Response::builder()
+                                            .status(StatusCode::OK)
+                                            .body(Body::from(json_response))
+                                            .unwrap();
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                    Err(e) => {
+                                        if e.kind() == ErrorKind::AlreadyExists {
+                                            let json_response = serde_json::json!({
+                                                "state": "upload_in_progress",
+                                            });
+                                            let json_response = serde_json::to_string(&json_response).unwrap();
+                                            let response = Response::builder()
+                                                .status(StatusCode::OK)
+                                                .body(Body::from(json_response))
+                                                .unwrap();
+                                            return Ok::<_, Infallible>(response);
+                                        } else {
+                                            let json_error = serde_json::json!({
+                                                "error": format!("Failed to create lock file: {}", e),
+                                            });
+                                            let json_error = serde_json::to_string(&json_error).unwrap();
+                                            let response = Response::builder()
+                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                .body(Body::from(json_error))
+                                                .unwrap();
+                                            return Ok::<_, Infallible>(response);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         (hyper::Method::GET, ["health"]) => {
                             let json_request = r#"{"healthy": "true"}"#;
                             let response = Response::new(Body::from(json_request));
@@ -873,7 +990,7 @@ fn upload_image_to_sqlite_db(
     let sqlite_connection = pool.get()?;
 
     sqlite_connection.execute(
-        "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data) 
+        "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data)
                                VALUES (?, ?, ?, ?, ?)",
         params![
             preimage_data.0,
