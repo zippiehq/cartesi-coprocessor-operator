@@ -58,11 +58,14 @@ async fn main() {
     let new_record = Arc::new((Mutex::new(false), Condvar::new()));
 
     let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
-    let sqlite_connect =
-        rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap();
+    let sqlite_connection = Arc::new(Mutex::new(
+        rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap(),
+    ));
 
     // Create table for requests
-    sqlite_connect
+    sqlite_connection
+        .lock()
+        .unwrap()
         .execute(
             "CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -76,7 +79,9 @@ async fn main() {
         .unwrap();
 
     // Create table for preimages
-    sqlite_connect
+    sqlite_connection
+        .lock()
+        .unwrap()
         .execute(
             "CREATE TABLE IF NOT EXISTS preimages (
             hash_type               INTEGER CHECK( hash_type IN (1, 2, 3) ) NOT NULL,
@@ -89,7 +94,9 @@ async fn main() {
         )
         .unwrap();
 
-    sqlite_connect
+    sqlite_connection
+        .lock()
+        .unwrap()
         .execute(
             "CREATE INDEX IF NOT EXISTS preimages_hash ON preimages (hash);",
             [],
@@ -97,7 +104,9 @@ async fn main() {
         .unwrap();
 
     // Create table for results
-    sqlite_connect
+    sqlite_connection
+        .lock()
+        .unwrap()
         .execute(
             "
             CREATE TABLE IF NOT EXISTS results (
@@ -118,16 +127,14 @@ async fn main() {
     thread::spawn({
         let requests = requests.clone();
         let new_record = new_record.clone();
+        let sqlite_connection = sqlite_connection.clone();
 
         move || {
             let requests = requests.clone();
             let new_record = new_record.clone();
+            let sqlite_connection = sqlite_connection.clone();
 
             loop {
-                let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
-                let sqlite_connection =
-                Arc::new(Mutex::new(rusqlite::Connection::open(Path::new(&db_directory).join("requests.db"))
-                        .unwrap()));
                 // Query one record from the DB (choose the one, with the highest priority)
                 let classic_request = query_request_with_the_highest_priority(
                     sqlite_connection.clone(),
@@ -166,9 +173,7 @@ async fn main() {
             }
         }
     });
-    let sqlite_connection =
-    Arc::new(Mutex::new(rusqlite::Connection::open(Path::new(&db_directory).join("requests.db"))
-            .unwrap()));
+    
     let service = make_service_fn(|_| {
         let requests = requests.clone();
         let sqlite_connection = sqlite_connection.clone();
