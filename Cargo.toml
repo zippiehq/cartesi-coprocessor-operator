@@ -7,6 +7,7 @@ edition = "2021"
 async-std = { version = "1", features = ["attributes", "tokio1"] }
 advance_runner = {git = "https://github.com/zippiehq/cartesi-advance-runner", rev = "3da5d2cf4f0aec424a9ce75946a1ef09e4078848"}
 hyper = { version = "0.14", features = ["full"] }
+hyper-tls = "0.5.0"
 hex = "0.4"
 serde_json = "1.0.132"
 regex = "1.11.0"
