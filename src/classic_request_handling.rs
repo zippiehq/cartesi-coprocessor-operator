@@ -156,17 +156,18 @@ pub(crate) fn query_request_with_the_highest_priority(
 }
 
 pub(crate) async fn handle_database_request(
-    sqlite_connection: PooledConnection<SqliteConnectionManager>,
+    pool: &r2d2::Pool<SqliteConnectionManager>,
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
-    let response = handle_classic(classic_request).await.unwrap();
+    let response = handle_classic(classic_request, pool).await.unwrap();
 
     let reason = match response.1 {
         YieldManualReason::Accepted => 1,
         YieldManualReason::Rejected => 2,
         YieldManualReason::Exception => 4,
     };
+    let sqlite_connection = pool.get().unwrap();
 
     sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority])
 .unwrap();
@@ -183,6 +184,7 @@ pub(crate) async fn handle_database_request(
 
 pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
+    pool: &r2d2::Pool<SqliteConnectionManager>,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
         0 => false,
@@ -285,10 +287,6 @@ pub(crate) async fn handle_classic(
             return result;
         })
     });
-
-    let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
-    let manager = SqliteConnectionManager::file(Path::new(&db_directory).join("requests.db"));
-    let pool = r2d2::Pool::new(manager).unwrap();
 
     let get_preimage = {
         let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
