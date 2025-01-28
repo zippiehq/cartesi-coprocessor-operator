@@ -26,6 +26,7 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::Uri;
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use hyper_tls::HttpsConnector;
+use hyper::header::CONTENT_TYPE;
 use ipfs_api_backend_hyper::IpfsApi;
 use r2d2::Pool;
 use regex::Regex;
@@ -51,7 +52,11 @@ use r2d2_sqlite::SqliteConnectionManager;
 #[cfg(feature = "bls_signing")]
 use signer_eigen::SignerEigen;
 use std::sync::Condvar;
-
+use async_std::fs::File;
+use async_std::io::BufReader;
+use std::fs::File as OtherFile;
+use async_std::io::ReadExt;
+use futures::stream;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 enum UploadState {
     UploadStarted,
@@ -61,6 +66,60 @@ enum UploadState {
     DagImportingComplete,
     DagImportError(String),
     UploadFailed(String),
+}
+
+async fn upload_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Open the file for streaming
+    let file = File::open(file_path).await?;
+    let mut reader = BufReader::new(file);
+
+    // Define the multipart start and end boundaries
+    let start_boundary = format!(
+        "--{}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"file\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+        boundary
+    );
+    let end_boundary = format!("\r\n--{}--\r\n", boundary);
+
+    // Create a multipart stream: boundary start, file stream, and boundary end
+    let file_stream = async_stream::stream! {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            yield Ok(buf[..n].to_vec());
+        }
+    };
+
+    let body_stream = stream::iter(vec![
+        Ok::<_, std::io::Error>(start_boundary.into()),
+    ])
+    .chain(file_stream)
+    .chain(stream::iter(vec![
+        Ok::<_, std::io::Error>(end_boundary.into()),
+    ]));
+
+    // Wrap the stream into a Hyper Body
+    let body = Body::wrap_stream(body_stream);
+
+    // Build the HTTP request for /api/v0/dag/import
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .header(CONTENT_TYPE, format!("multipart/form-data; boundary={}", boundary))
+        .body(body)?;
+
+    // Send the request
+    let client = Client::new();
+    let response = client.request(request).await?;
+
+    // Print the response status and body
+    println!("Response: {}", response.status());
+    let body_bytes = hyper::body::to_bytes(response.into_body()).await?;
+    println!("Response Body: {}", String::from_utf8_lossy(&body_bytes));
+
+    Ok(())
 }
 #[async_std::main]
 

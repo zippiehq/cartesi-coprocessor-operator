@@ -2073,6 +2073,7 @@ dependencies = [
  "alloy-provider 0.8.3",
  "alloy-rpc-types-eth 0.8.3",
  "async-std",
+ "async-stream",
  "base64 0.22.1",
  "bincode",
  "cbor",
