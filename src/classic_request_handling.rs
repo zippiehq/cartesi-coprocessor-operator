@@ -1,4 +1,4 @@
-use crate::upload_image_to_sqlite_db;
+use crate::{HashType, Utc};
 use advance_runner::YieldManualReason;
 use advance_runner::{run_advance, Callback};
 use alloy_primitives::Keccak256;
@@ -7,8 +7,6 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
 use futures_channel::oneshot::Sender;
 use hyper::{body::to_bytes, Body, Client, Request};
-use r2d2::PooledConnection;
-use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
 use rusqlite::params;
 use std::collections::HashMap;
@@ -17,14 +15,43 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 use std::{env::var, error::Error, vec};
-
 const GET_STORAGE_GIO: u32 = 0x27;
 const GET_CODE_GIO: u32 = 0x28;
 const GET_ACCOUNT_GIO: u32 = 0x29;
 const GET_IMAGE_GIO: u32 = 0x2a;
 const LLAMA_COMPLETION_GIO: u32 = 0x2b;
 const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
+
+fn upload_image_to_sqlite_db(
+    sqlite_connection: Arc<rusqlite::Connection>,
+    preimage_data: &(u8, Vec<u8>, Vec<u8>),
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !(preimage_data.0 == HashType::SHA256 as u8
+        || preimage_data.0 == HashType::KECCAK256 as u8
+        || preimage_data.0 == HashType::ESPRESSO_TX as u8)
+    {
+        return Err(Box::<dyn std::error::Error>::from(
+            "sent hash type isn't supported",
+        ));
+    }
+    let created_at = Utc::now();
+    let storage_rent_paid_until = created_at + chrono::Duration::days(365);
+    sqlite_connection.execute(
+        "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data) 
+                               VALUES (?, ?, ?, ?, ?)",
+        params![
+            preimage_data.0,
+            preimage_data.1,
+            created_at.timestamp(),
+            storage_rent_paid_until.timestamp(),
+            preimage_data.2
+        ],
+    )?;
+    return Ok(());
+}
+
 pub(crate) fn add_request_to_database(
     sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
@@ -39,9 +66,18 @@ pub(crate) fn add_request_to_database(
         false => 0,
     };
     // Write down new request to the DB
-
-    let id: i64  =  sqlite_connection.lock().unwrap().query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)
-).unwrap();
+    let sqlite_connection = sqlite_connection.lock().unwrap();
+    let start = SystemTime::now();
+    let id: i64 = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)
+    ).unwrap();
+    let end = SystemTime::now();
+    if end.duration_since(start).unwrap().as_millis() > 5000 {
+        println!(
+            "add_request_to_database insert {:?}",
+            end.duration_since(start).unwrap().as_millis()
+        );
+    }
+    drop(sqlite_connection);
     let mut requests = requests.lock().unwrap();
     requests.insert(id, sender);
 }
@@ -56,13 +92,23 @@ pub(crate) fn check_previously_handled_results(
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) {
+    let start = SystemTime::now();
+    let before_lock = SystemTime::now();
     let sqlite_connection = sqlite_connection.lock().unwrap();
+
     let mut statement = sqlite_connection
     .prepare(
         "SELECT * FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ?;",
     )
     .unwrap();
-
+    let after_prepare = SystemTime::now();
+    println!(
+        "after_prepare and  before_lock{:?}",
+        after_prepare
+            .duration_since(before_lock)
+            .unwrap()
+            .as_millis()
+    );
     let mut rows = statement
         .query(params![
             machine_snapshot_path.to_str(),
@@ -71,6 +117,14 @@ pub(crate) fn check_previously_handled_results(
             priority
         ])
         .unwrap();
+    let after_query_rows = SystemTime::now();
+    println!(
+        "after_query_rows and  after_prepare{:?}",
+        after_query_rows
+            .duration_since(after_prepare)
+            .unwrap()
+            .as_millis()
+    );
     if let Some(statement) = rows.next().unwrap() {
         println!("this request has been already handled");
         *outputs_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
@@ -81,7 +135,17 @@ pub(crate) fn check_previously_handled_results(
             2 => Some(YieldManualReason::Rejected),
             4 => Some(YieldManualReason::Exception),
             _ => None,
-        }
+        };
+    }
+    drop(rows);
+    drop(statement);
+    drop(sqlite_connection);
+    let end = SystemTime::now();
+    if end.duration_since(start).unwrap().as_millis() > 5000 {
+        /*println!(
+            "check_previously_handled_results {:?}",
+            end.duration_since(start).unwrap().as_millis()
+        );*/
     }
 }
 
@@ -93,8 +157,9 @@ pub(crate) fn query_result_from_database(
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) {
-    let sqlite_connection = sqlite_connection.lock().unwrap();
     // Query the result from the DB
+    let start = SystemTime::now();
+    let sqlite_connection = sqlite_connection.lock().unwrap();
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
         .unwrap();
@@ -112,16 +177,28 @@ pub(crate) fn query_result_from_database(
             _ => None,
         }
     }
+    let end = SystemTime::now();
+    if end.duration_since(start).unwrap().as_millis() > 5000 {
+        println!(
+            "query_result_from_database {:?}",
+            end.duration_since(start).unwrap().as_millis()
+        );
+    }
+    drop(rows);
+    drop(statement);
+    drop(sqlite_connection);
 }
 
 pub(crate) fn query_request_with_the_highest_priority(
-    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
+    sqlite_connection: Arc<rusqlite::Connection>,
     new_record: Arc<(Mutex<bool>, Condvar)>,
 ) -> ClassicRequest {
-    let sqlite_connection = sqlite_connection.lock().unwrap();
-    let mut statement = sqlite_connection
-        .prepare(
-            "WITH highest_priority_row AS (
+    let start = SystemTime::now();
+    loop {
+        let sqlite_connection = sqlite_connection.clone();
+        let mut statement = sqlite_connection
+            .prepare(
+                "WITH highest_priority_row AS (
                         SELECT *
                         FROM requests
                         ORDER BY priority DESC
@@ -131,10 +208,8 @@ pub(crate) fn query_request_with_the_highest_priority(
                     WHERE id IN (SELECT id FROM highest_priority_row)
                     RETURNING *;
             ",
-        )
-        .unwrap();
-
-    loop {
+            )
+            .unwrap();
         let mut rows = statement.query([]).unwrap();
         let res = rows.next().unwrap();
         if let Some(statement) = res {
@@ -146,6 +221,9 @@ pub(crate) fn query_request_with_the_highest_priority(
                 priority: statement.get(4).unwrap(),
             };
         } else {
+            drop(rows);
+            drop(statement);
+            drop(sqlite_connection);
             println!("Waiting for new data to come in");
             let (lock, cvar) = &*new_record;
             let mut record = lock.lock().unwrap();
@@ -156,11 +234,18 @@ pub(crate) fn query_request_with_the_highest_priority(
 
             *record = false;
         }
+        let end = SystemTime::now();
+        if end.duration_since(start).unwrap().as_millis() > 5000 {
+            println!(
+                "query_request_with_the_highest_priority {:?}",
+                end.duration_since(start).unwrap().as_millis()
+            );
+        };
     }
 }
 
 pub(crate) async fn handle_database_request(
-    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
+    sqlite_connection: Arc<rusqlite::Connection>,
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
@@ -173,9 +258,10 @@ pub(crate) async fn handle_database_request(
         YieldManualReason::Rejected => 2,
         YieldManualReason::Exception => 4,
     };
-    sqlite_connection.lock().unwrap().execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority])
+    sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority])
 .unwrap();
-let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
+    drop(sqlite_connection);
+    let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
         requests.lock().unwrap();
     match requests.remove(&classic_request.id) {
         Some(sender) => {
@@ -188,7 +274,7 @@ let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
 
 pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
-    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
+    sqlite_connection: Arc<rusqlite::Connection>,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn Error>> {
     let no_console_putchar = match classic_request.no_console_putchar {
         0 => false,
@@ -297,7 +383,6 @@ pub(crate) async fn handle_classic(
         move |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
             let hash_type = input.remove(0);
             let data = input;
-            let sqlite_connection = sqlite_connection.lock().unwrap();
             let mut statement = sqlite_connection
                 .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ?;")?;
 

@@ -35,6 +35,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use std::{convert::Infallible, net::SocketAddr};
 const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
@@ -58,14 +59,14 @@ async fn main() {
     let new_record = Arc::new((Mutex::new(false), Condvar::new()));
 
     let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
-    let sqlite_connection = Arc::new(Mutex::new(
-        rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap(),
-    ));
 
+    let sqlite_connection =
+        rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap();
+    sqlite_connection
+        .busy_timeout(Duration::from_secs(720))
+        .unwrap();
     // Create table for requests
     sqlite_connection
-        .lock()
-        .unwrap()
         .execute(
             "CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
@@ -80,8 +81,6 @@ async fn main() {
 
     // Create table for preimages
     sqlite_connection
-        .lock()
-        .unwrap()
         .execute(
             "CREATE TABLE IF NOT EXISTS preimages (
             hash_type               INTEGER CHECK( hash_type IN (1, 2, 3) ) NOT NULL,
@@ -95,8 +94,6 @@ async fn main() {
         .unwrap();
 
     sqlite_connection
-        .lock()
-        .unwrap()
         .execute(
             "CREATE INDEX IF NOT EXISTS preimages_hash ON preimages (hash);",
             [],
@@ -105,8 +102,6 @@ async fn main() {
 
     // Create table for results
     sqlite_connection
-        .lock()
-        .unwrap()
         .execute(
             "
             CREATE TABLE IF NOT EXISTS results (
@@ -123,17 +118,20 @@ async fn main() {
             params![],
         )
         .unwrap();
-
+    
     thread::spawn({
         let requests = requests.clone();
         let new_record = new_record.clone();
-        let sqlite_connection = sqlite_connection.clone();
-
+        let db_directory = db_directory.clone();
         move || {
             let requests = requests.clone();
             let new_record = new_record.clone();
-            let sqlite_connection = sqlite_connection.clone();
-
+            let sqlite_connection =
+                rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap();
+            sqlite_connection
+                .busy_timeout(Duration::from_secs(720))
+                .unwrap();
+            let sqlite_connection = Arc::new(sqlite_connection);
             loop {
                 // Query one record from the DB (choose the one, with the highest priority)
                 let classic_request = query_request_with_the_highest_priority(
@@ -153,10 +151,17 @@ async fn main() {
                 thread::spawn({
                     let requests = requests.clone();
                     let thread_count = thread_count.clone();
-                    let sqlite_connection = sqlite_connection.clone();
+                    let db_directory = db_directory.clone();
                     move || {
                         let (number_of_active_threads, cvar) = &*thread_count;
-
+                        let sqlite_connection = rusqlite::Connection::open(
+                            Path::new(&db_directory).join("requests.db"),
+                        )
+                        .unwrap();
+                        sqlite_connection
+                            .busy_timeout(Duration::from_secs(720))
+                            .unwrap();
+                        let sqlite_connection = Arc::new(sqlite_connection);
                         // Handle request and write the result into DB
                         async_std::task::block_on(async {
                             handle_database_request(
@@ -173,12 +178,16 @@ async fn main() {
             }
         }
     });
-    
     let service = make_service_fn(|_| {
         let requests = requests.clone();
-        let sqlite_connection = sqlite_connection.clone();
         let new_record = new_record.clone();
-
+        let db_directory = db_directory.clone();
+        let sqlite_connection =
+            rusqlite::Connection::open(Path::new(&db_directory).join("requests.db")).unwrap();
+        sqlite_connection
+            .busy_timeout(Duration::from_secs(720))
+            .unwrap();
+        let sqlite_connection = Arc::new(Mutex::new(sqlite_connection));
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
                 let requests = requests.clone();
@@ -262,19 +271,18 @@ async fn main() {
                             let mut reports_vector: Option<Vec<(u16, Vec<u8>)>> = None;
                             let mut finish_result: Option<(u16, Vec<u8>)> = None;
                             let mut reason: Option<advance_runner::YieldManualReason> = None;
-                            {
-                                check_previously_handled_results(
-                                    sqlite_connection.clone(),
-                                    &machine_snapshot_path,
-                                    &payload,
-                                    &no_console_putchar,
-                                    &priority,
-                                    &mut outputs_vector,
-                                    &mut reports_vector,
-                                    &mut finish_result,
-                                    &mut reason,
-                                );
-                            }
+                            check_previously_handled_results(
+                                sqlite_connection.clone(),
+                                &machine_snapshot_path,
+                                &payload,
+                                &no_console_putchar,
+                                &priority,
+                                &mut outputs_vector,
+                                &mut reports_vector,
+                                &mut finish_result,
+                                &mut reason,
+                            );
+
                             if outputs_vector.is_none()
                                 || reports_vector.is_none()
                                 || finish_result.is_none()
@@ -282,17 +290,16 @@ async fn main() {
                             {
                                 println!("this request hasn't been handled yet");
                                 let (sender, receiver) = channel::<i64>();
-                                {
-                                    add_request_to_database(
-                                        sqlite_connection.clone(),
-                                        requests,
-                                        sender,
-                                        &machine_snapshot_path,
-                                        &payload,
-                                        &no_console_putchar,
-                                        &priority,
-                                    );
-                                }
+                                add_request_to_database(
+                                    sqlite_connection.clone(),
+                                    requests,
+                                    sender,
+                                    &machine_snapshot_path,
+                                    &payload,
+                                    &no_console_putchar,
+                                    &priority,
+                                );
+
                                 {
                                     // Notifies that new record was written to the DB
                                     let (lock, cvar) = &*new_record;
@@ -391,7 +398,6 @@ async fn main() {
                                     serde_json::Value::String(signature_hex);
                             }
                             let json_response = serde_json::to_string(&json_response).unwrap();
-
                             let response = Response::builder()
                                 .status(StatusCode::OK)
                                 .body(Body::from(json_response))
@@ -399,7 +405,7 @@ async fn main() {
 
                             return Ok::<_, Infallible>(response);
                         }
-                        (hyper::Method::POST, ["check_preimages_status"]) => {
+                        /*(hyper::Method::POST, ["check_preimages_status"]) => {
                             let hash_types_and_hashes: Vec<u8> =
                                 hyper::body::to_bytes(req.into_body())
                                     .await
@@ -529,8 +535,6 @@ async fn main() {
                         }
                         (hyper::Method::GET, ["get_preimage", hash_type, hash]) => {
                             let sqlite_connection = sqlite_connection.clone();
-                            let sqlite_connection = sqlite_connection.lock().unwrap();
-
                             let mut statement = sqlite_connection
                                 .prepare(
                                     "SELECT data FROM preimages WHERE hash_type = ? AND hash = ?;",
@@ -561,7 +565,7 @@ async fn main() {
                                 .unwrap();
 
                             return Ok::<_, Infallible>(response);
-                        }
+                        }*/
                         (hyper::Method::POST, ["ensure", cid_str, machine_hash, size_str]) => {
                             // Check machine_hash format
                             if let Err(err_response) = check_hash_format(
@@ -827,11 +831,9 @@ fn check_preimage_hash(
 }
 
 fn preimage_available(
-    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
+    sqlite_connection: Arc<rusqlite::Connection>,
     hash_type_and_data: &(u8, Vec<u8>),
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let sqlite_connection = sqlite_connection.lock().unwrap();
-
     let mut statement = sqlite_connection.prepare(
         "SELECT storage_rent_paid_until FROM preimages WHERE hash_type = ? AND hash = ?;",
     )?;
@@ -846,11 +848,9 @@ fn preimage_available(
     }
 }
 fn record_exists(
-    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
+    sqlite_connection: Arc<rusqlite::Connection>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> bool {
-    let sqlite_connection = sqlite_connection.lock().unwrap();
-
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM preimages WHERE hash_type = ? AND hash = ? AND data = ?;")
         .unwrap();
@@ -864,7 +864,7 @@ fn record_exists(
     return false;
 }
 fn upload_image_to_sqlite_db(
-    sqlite_connection: Arc<Mutex<rusqlite::Connection>>,
+    sqlite_connection: Arc<rusqlite::Connection>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !(preimage_data.0 == HashType::SHA256 as u8
@@ -877,8 +877,7 @@ fn upload_image_to_sqlite_db(
     }
     let created_at = Utc::now();
     let storage_rent_paid_until = created_at + chrono::Duration::days(365);
-
-    sqlite_connection.lock().unwrap().execute(
+    sqlite_connection.execute(
         "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data) 
                                VALUES (?, ?, ?, ?, ?)",
         params![
