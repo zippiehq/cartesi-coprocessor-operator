@@ -69,69 +69,32 @@ enum UploadState {
     UploadFailed(String),
 }
 
-async fn upload_car_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Open the file for streaming
-    let file = File::open(file_path).await?;
-    let mut reader = BufReader::new(file);
+async fn upload_car_file_to_ipfs(file_path: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let form = reqwest::multipart::Form::new().file("file", file_path).await;
+    if !form.is_ok() {
+        return Ok(());
+    }
+    let client = reqwest::Client::new();
+    let resp = client.post(url).multipart(form.unwrap()).send().await;
+    if resp.is_ok() {
+        return Ok(());
+    }
+    if resp.unwrap().status().is_success() {
+        return Ok(());
+    } else {
+        return Ok(());
+    }
 
-    // Define the multipart start and end boundaries
-    let start_boundary = format!(
-        "--{}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"file\"\r\nContent-Type: application/octet-stream\r\n\r\n",
-        boundary
-    );
-    let end_boundary = format!("\r\n--{}--\r\n", boundary);
-
-    // Create a multipart stream: boundary start, file stream, and boundary end
-    let file_stream = async_stream::stream! {
-        let mut buf = [0u8; 8192];
-        loop {
-            let n = reader.read(&mut buf).await.unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            yield Ok(buf[..n].to_vec());
-        }
-    };
-
-    let body_stream = stream::iter(vec![
-        Ok::<_, std::io::Error>(start_boundary.into()),
-    ])
-    .chain(file_stream)
-    .chain(stream::iter(vec![
-        Ok::<_, std::io::Error>(end_boundary.into()),
-    ]));
-
-    // Wrap the stream into a Hyper Body
-    let body = Body::wrap_stream(body_stream);
-
-    // Build the HTTP request for /api/v0/dag/import
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri(url)
-        .header(CONTENT_TYPE, format!("multipart/form-data; boundary={}", boundary))
-        .body(body)?;
-
-    // Send the request
-    let client = Client::new();
-    let response = client.request(request).await?;
-
-    // Print the response status and body
-    println!("Response: {}", response.status());
-    let body_bytes = hyper::body::to_bytes(response.into_body()).await?;
-    println!("Response Body: {}", String::from_utf8_lossy(&body_bytes));
-
-    Ok(())
 }
 
 async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let url = "http://127.0.0.1:5001/api/v0/dag/import";
-    let boundary = "MyBoundary123";
 
     let file_path_str = match file_path.to_str() {
         Some(s) => s,
         None => return Err("Invalid file path".into()),
     };
-    upload_car_file_to_ipfs(file_path_str, url, boundary).await
+    upload_car_file_to_ipfs(file_path_str, url).await
 }
 #[async_std::main]
 
