@@ -57,6 +57,9 @@ enum UploadState {
     UploadStarted,
     UploadInProgress(u64),
     UploadCompleted(u64),
+    DagImporting,
+    DagImportingComplete,
+    DagImportError(String),
     UploadFailed(String),
 }
 #[async_std::main]
@@ -862,6 +865,16 @@ async fn main() {
                                             "state": "upload_completed",
                                             "file_size": size
                                         }),
+                                        UploadState::DagImporting => json!({
+                                            "state": "dag_importing",
+                                        }),
+                                        UploadState::DagImportingComplete => json!({
+                                            "state": "dag_importing_complete",
+                                        }),
+                                        UploadState::DagImportError(err_msg) => json!({
+                                            "state": "dag_import_error",
+                                            "error": err_msg,
+                                        }),
                                         UploadState::UploadFailed(err_msg) => json!({
                                             "state": "upload_failed",
                                             "error": err_msg,
@@ -1100,13 +1113,45 @@ async fn main() {
                                             );
                                         }
 
+                                        {
+                                            let mut map = upload_status_map_clone.lock().unwrap();
+                                            map.insert(
+                                                upload_id_clone.clone(),
+                                                UploadState::DagImporting,
+                                            );
+                                        }
+                                        match perform_dag_import(&file_path).await {
+                                            Ok(_) => {
+                                                let mut map = upload_status_map_clone.lock().unwrap();
+                                                map.insert(
+                                                    upload_id_clone.clone(),
+                                                    UploadState::DagImportingComplete,
+                                                );
+                                                println!(
+                                                    "DAG import completed successfully for upload_id: {}",
+                                                    upload_id_clone
+                                                );
+                                            }
+                                            Err(e) => {
+                                                let mut map = upload_status_map_clone.lock().unwrap();
+                                                map.insert(
+                                                    upload_id_clone.clone(),
+                                                    UploadState::DagImportError(e.to_string()),
+                                                );
+                                                eprintln!(
+                                                    "DAG import failed for upload_id: {}: {}",
+                                                    upload_id_clone, e
+                                                );
+                                            }
+                                        }
+
                                         let _ = async_std::fs::remove_file(
                                             &upload_dir.with_extension("lock"),
                                         )
                                         .await;
 
                                         println!(
-                                            "Download completed successfully for upload_id: {} (Size: {} bytes)",
+                                            "Download and DAG import completed successfully for upload_id: {} (Size: {} bytes)",
                                             upload_id_clone, file_size
                                         );
                                     });
@@ -1164,6 +1209,16 @@ async fn main() {
                                     UploadState::UploadCompleted(size) => json!({
                                         "state": "upload_completed",
                                         "file_size": size
+                                    }),
+                                    UploadState::DagImporting => json!({
+                                        "state": "dag_importing"
+                                    }),
+                                    UploadState::DagImportingComplete => json!({
+                                        "state": "dag_importing_complete"
+                                     }),
+                                    UploadState::DagImportError(err) =>json!({
+                                        "state": "dag_import_error",
+                                        "error": err,
                                     }),
                                     UploadState::UploadFailed(err) => json!({
                                         "state": "upload_failed",
