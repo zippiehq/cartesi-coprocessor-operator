@@ -4,6 +4,7 @@ mod outputs_merkle;
 use alloy_primitives::utils::{keccak256, Keccak256};
 use alloy_primitives::{FixedBytes, B256};
 use async_std::fs::OpenOptions;
+use async_std::io::WriteExt;
 use base64::{prelude::BASE64_STANDARD, Engine};
 use cbor::Decoder;
 use chrono::Utc;
@@ -15,26 +16,35 @@ use classic_request_handling::{
 use committable::Committable;
 use espresso_transaction::EspressoTransaction;
 use futures::channel::oneshot::{channel, Sender};
+use futures::StreamExt;
 use futures::TryStreamExt;
 use hex::FromHexError;
 use hyper::body::to_bytes;
+use hyper::client::{self, HttpConnector};
 use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
+use hyper::Uri;
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
+use hyper_tls::HttpsConnector;
+use hyper::header::CONTENT_TYPE;
 use ipfs_api_backend_hyper::IpfsApi;
 use r2d2::Pool;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fs;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::{convert::Infallible, net::SocketAddr};
+use std::{env, path::PathBuf};
+use std::error::Error;
 const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
@@ -43,8 +53,98 @@ use r2d2_sqlite::SqliteConnectionManager;
 #[cfg(feature = "bls_signing")]
 use signer_eigen::SignerEigen;
 use std::sync::Condvar;
+use async_std::fs::File;
+use async_std::io::BufReader;
+use std::fs::File as OtherFile;
+use async_std::io::ReadExt;
+use futures::stream;
+#[derive(Debug, Serialize, Deserialize, Clone)]
+enum UploadState {
+    UploadStarted,
+    UploadInProgress(u64),
+    UploadCompleted(u64),
+    DagImporting,
+    DagImportingComplete,
+    DagImportError(String),
+    UploadFailed(String),
+}
+
+async fn upload_car_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Open the file for streaming
+    let file = File::open(file_path).await?;
+    let mut reader = BufReader::new(file);
+
+    // Define the multipart start and end boundaries
+    let start_boundary = format!(
+        "--{}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"file\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+        boundary
+    );
+    let end_boundary = format!("\r\n--{}--\r\n", boundary);
+
+    // Create a multipart stream: boundary start, file stream, and boundary end
+    let file_stream = async_stream::stream! {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = reader.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            yield Ok(buf[..n].to_vec());
+        }
+    };
+
+    let body_stream = stream::iter(vec![
+        Ok::<_, std::io::Error>(start_boundary.into()),
+    ])
+    .chain(file_stream)
+    .chain(stream::iter(vec![
+        Ok::<_, std::io::Error>(end_boundary.into()),
+    ]));
+
+    // Wrap the stream into a Hyper Body
+    let body = Body::wrap_stream(body_stream);
+
+    // Build the HTTP request for /api/v0/dag/import
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(url)
+        .header(CONTENT_TYPE, format!("multipart/form-data; boundary={}", boundary))
+        .body(body)?;
+
+    // Send the request
+    let client = Client::new();
+    let response = client.request(request).await?;
+
+    // Print the response status and body
+    println!("Response: {}", response.status());
+    let body_bytes = hyper::body::to_bytes(response.into_body()).await?;
+    println!("Response Body: {}", String::from_utf8_lossy(&body_bytes));
+
+    Ok(())
+}
+
+async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
+    let url = "http://127.0.0.1:5001/api/v0/dag/import";
+    let boundary = "----MyBoundary123";
+
+    let file_path_str = match file_path.to_str() {
+        Some(s) => s,
+        None => return Err("Invalid file path".into()),
+    };
+    upload_car_file_to_ipfs(file_path_str, url, boundary).await
+}
 #[async_std::main]
+
 async fn main() {
+    // const UPLOAD_STARTED: &str = "upload_started";
+    // const UPLOAD_IN_PROGRESS: &str = "upload_in_progress";
+    // const UPLOAD_COMPLETED: &str = "upload_completed";
+    // const UPLOAD_FAILED: &str = "upload_failed";
+
+    let upload_status_map = Arc::new(Mutex::new(HashMap::<String, UploadState>::new()));
+
+    let upload_status_map_clone = upload_status_map.clone();
+
     let addr: SocketAddr = ([0, 0, 0, 0], 3033).into();
     let max_threads_number = std::env::var("MAX_THREADS_NUMBER")
         .unwrap_or("3".to_string())
@@ -59,6 +159,9 @@ async fn main() {
     let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
     let manager = SqliteConnectionManager::file(Path::new(&db_directory).join("requests.db"));
     let pool = r2d2::Pool::new(manager).unwrap();
+    let https = HttpsConnector::new();
+    let client = Client::builder().build::<_, hyper::Body>(https);
+    let client = Arc::new(client);
 
     let sqlite_connect = pool.get().unwrap();
     // Create table for requests
@@ -172,11 +275,16 @@ async fn main() {
         let pool = pool.clone();
         let new_record = new_record.clone();
 
+        let upload_status_map = upload_status_map_clone.clone();
+        let client = client.clone();
+
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
+                let client = client.clone();
                 let requests = requests.clone();
                 let pool = pool.clone();
                 let new_record = new_record.clone();
+                let upload_status_map = upload_status_map.clone();
                 async move {
                     let path = req.uri().path().to_owned();
                     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
@@ -746,6 +854,467 @@ async fn main() {
                                 }
                             }
                         }
+                        (hyper::Method::POST, ["upload", upload_id]) => {
+                            #[derive(Debug, Deserialize)]
+                            struct PublishParams {
+                                presigned_url: String,
+                                upload_id: String,
+                            }
+
+                            let whole_body = match hyper::body::to_bytes(req.into_body()).await {
+                                Ok(body) => body,
+                                Err(e) => {
+                                    let json_error = json!({
+                                        "error": format!("Failed to read request body: {}", e),
+                                    });
+                                    let response = Response::builder()
+                                        .status(StatusCode::BAD_REQUEST)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_error.to_string()))
+                                        .unwrap();
+                                    return Ok(response);
+                                }
+                            };
+
+                            let publish_params: PublishParams =
+                                match serde_json::from_slice(&whole_body) {
+                                    Ok(params) => params,
+                                    Err(e) => {
+                                        let json_error = json!({
+                                            "error": format!("Invalid JSON: {}", e),
+                                        });
+                                        let response = Response::builder()
+                                            .status(StatusCode::BAD_REQUEST)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(json_error.to_string()))
+                                            .unwrap();
+                                        return Ok(response);
+                                    }
+                                };
+
+                            let presigned_url = publish_params.presigned_url;
+                            let upload_id = publish_params.upload_id;
+
+                            // is the upload id format check necessary?
+
+                            if let Err(err_response) = check_hash_format(
+                                &upload_id,
+                                "upload_id invalid format",
+                            ) {
+                                return Ok(err_response);
+                            }
+
+                            let upload_status_map_clone = upload_status_map.clone();
+
+                            let upload_dir = match env::var("UPLOAD_DIR") {
+                                Ok(dir) => PathBuf::from(dir),
+                                Err(_) => {
+                                    let json_error = json!({
+                                        "error": "UPLOAD_DIR environment variable is not set",
+                                    });
+                                    let response = Response::builder()
+                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_error.to_string()))
+                                        .unwrap();
+                                    return Ok(response);
+                                }
+                            };
+                            {
+                                let mut map = upload_status_map.lock().unwrap();
+
+                                if let Some(state) = map.get(&upload_id) {
+                                    let json_response = match state {
+                                        UploadState::UploadStarted => {
+                                            json!({ "state": "upload_started" })
+                                        }
+                                        UploadState::UploadInProgress(size) => json!({
+                                               "state": "upload_in_progress",
+                                               "file_size": size
+                                        }),
+                                        UploadState::UploadCompleted(size) => json!({
+                                            "state": "upload_completed",
+                                            "file_size": size
+                                        }),
+                                        UploadState::DagImporting => json!({
+                                            "state": "dag_importing",
+                                        }),
+                                        UploadState::DagImportingComplete => json!({
+                                            "state": "dag_importing_complete",
+                                        }),
+                                        UploadState::DagImportError(err_msg) => json!({
+                                            "state": "dag_import_error",
+                                            "error": err_msg,
+                                        }),
+                                        UploadState::UploadFailed(err_msg) => json!({
+                                            "state": "upload_failed",
+                                            "error": err_msg,
+                                        }),
+                                    };
+                                    let response = Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_response.to_string()))
+                                        .unwrap();
+                                    return Ok(response);
+                                }
+                            }
+
+                            let upload_dir_path = upload_dir.join(&upload_id);
+                            let lock_file_path = upload_dir_path.with_extension("lock");
+                            if upload_dir_path.exists() && !lock_file_path.exists() {
+                                let json_response = json!({
+                                    "state": "upload_completed",
+                                });
+                                let response = Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(json_response.to_string()))
+                                    .unwrap();
+                                return Ok(response);
+                            }
+
+                            match OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .create_new(true)
+                                .open(&lock_file_path)
+                                .await
+                            {
+                                Ok(_) => {
+                                    {
+                                        let mut map = upload_status_map_clone.lock().unwrap();
+                                        map.insert(upload_id.clone(), UploadState::UploadStarted);
+                                    }
+                                    let upload_status_map_clone = upload_status_map.clone();
+                                    let upload_id_clone = upload_id.clone();
+                                    let upload_dir_clone = upload_dir.clone();
+                                    let presigned_url_clone = presigned_url.clone();
+                                    let client_clone = client.clone();
+
+                                    async_std::task::spawn(async move {
+                                        {
+                                            let mut map = upload_status_map_clone.lock().unwrap();
+                                            map.insert(
+                                                upload_id_clone.clone(),
+                                                UploadState::UploadInProgress(0),
+                                            );
+                                        }
+                                        let upload_dir = upload_dir_clone.join(&upload_id_clone);
+                                        if let Err(e) =
+                                            async_std::fs::create_dir_all(&upload_dir).await
+                                        {
+                                            eprintln!(
+                                                "Failed to create directory {}: {}",
+                                                upload_dir.display(),
+                                                e
+                                            );
+                                            {
+                                                let mut map =
+                                                    upload_status_map_clone.lock().unwrap();
+                                                map.insert(
+                                                    upload_id_clone.clone(),
+                                                    UploadState::UploadFailed(format!(
+                                                        "Failed to create directory: {}",
+                                                        e
+                                                    )),
+                                                );
+                                            }
+                                            let _ = async_std::fs::remove_file(
+                                                &upload_dir.with_extension("lock"),
+                                            )
+                                            .await;
+                                            return;
+                                        }
+
+                                        let uri = match presigned_url_clone.parse::<Uri>() {
+                                            Ok(uri) => uri,
+                                            Err(e) => {
+                                                eprintln!("Failed to parse presigned URL: {}", e);
+                                                {
+                                                    let mut map = upload_status_map_clone.lock().unwrap();
+                                                    map.insert(
+                                                        upload_id_clone.clone(),
+                                                        UploadState::UploadFailed(format!("Failed to parse presigned URL: {}", e)),
+                                                    );
+                                                }
+                                                return;
+                                            }
+                                        };
+
+                                        let response = match client
+                                            .get(uri)
+                                            .await
+                                        {
+                                            Ok(resp) => resp,
+                                            Err(e) => {
+                                                eprintln!("Failed to send GET request: {}", e);
+                                                {
+                                                    let mut map =
+                                                        upload_status_map_clone.lock().unwrap();
+                                                    map.insert(
+                                                        upload_id_clone.clone(),
+                                                        UploadState::UploadFailed(format!(
+                                                            "Failed to send GET request: {}",
+                                                            e
+                                                        )),
+                                                    );
+                                                }
+                                                let _ = async_std::fs::remove_file(
+                                                    &upload_dir.with_extension("lock"),
+                                                )
+                                                .await;
+                                                return;
+                                            }
+                                        };
+
+                                        if !response.status().is_success() {
+                                            let error_msg = format!(
+                                                "Download failed with status: {}",
+                                                response.status()
+                                            );
+                                            eprintln!("{}", error_msg);
+                                            {
+                                                let mut map =
+                                                    upload_status_map_clone.lock().unwrap();
+                                                map.insert(
+                                                    upload_id_clone.clone(),
+                                                    UploadState::UploadFailed(error_msg),
+                                                );
+                                            }
+                                            let _ = async_std::fs::remove_file(
+                                                &upload_dir.with_extension("lock"),
+                                            )
+                                            .await;
+                                            return;
+                                        }
+                                        let file_path = upload_dir.join(&upload_id_clone);
+
+                                        let mut file =
+                                            match async_std::fs::File::create(&file_path).await {
+                                                Ok(f) => f,
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "Failed to create file {}: {}",
+                                                        file_path.display(),
+                                                        e
+                                                    );
+                                                    {
+                                                        let mut map =
+                                                            upload_status_map_clone.lock().unwrap();
+                                                        map.insert(
+                                                            upload_id_clone.clone(),
+                                                            UploadState::UploadFailed(format!(
+                                                                "Failed to create file: {}",
+                                                                e
+                                                            )),
+                                                        );
+                                                    }
+                                                    let _ = async_std::fs::remove_file(
+                                                        &upload_dir.with_extension("lock"),
+                                                    )
+                                                    .await;
+                                                    return;
+                                                }
+                                            };
+
+                                        let mut stream = response.into_body();
+
+                                        while let Some(Ok(chunk)) = stream.next().await {
+                                            let chunk: Vec<u8> = chunk.to_vec();
+                                            if let Err(e) = file.write_all(&chunk).await {
+                                                eprintln!(
+                                                    "Failed to write to file {}: {}",
+                                                    file_path.display(),
+                                                    e
+                                                );
+                                                {
+                                                    let mut map =
+                                                        upload_status_map_clone.lock().unwrap();
+                                                    map.insert(
+                                                        upload_id_clone.clone(),
+                                                        UploadState::UploadFailed(format!(
+                                                            "Failed to write to file: {}",
+                                                            e
+                                                        )),
+                                                    );
+                                                }
+                                                let _ = async_std::fs::remove_file(
+                                                    &upload_dir.with_extension("lock"),
+                                                )
+                                                .await;
+                                                return;
+                                            }
+                                        }
+
+                                        let file_metadata =
+                                            match async_std::fs::metadata(&file_path).await {
+                                                Ok(metadata) => metadata,
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "Failed to get metadata for {}: {}",
+                                                        file_path.display(),
+                                                        e
+                                                    );
+                                                    {
+                                                        let mut map =
+                                                            upload_status_map_clone.lock().unwrap();
+                                                        map.insert(
+                                                            upload_id_clone.clone(),
+                                                            UploadState::UploadFailed(format!(
+                                                                "Failed to get file metadata: {}",
+                                                                e
+                                                            )),
+                                                        );
+                                                    }
+                                                    let _ = async_std::fs::remove_file(
+                                                        &upload_dir.with_extension("lock"),
+                                                    )
+                                                    .await;
+                                                    return;
+                                                }
+                                            };
+                                        let file_size = file_metadata.len();
+
+                                        {
+                                            let mut map = upload_status_map_clone.lock().unwrap();
+                                            map.insert(
+                                                upload_id_clone.clone(),
+                                                UploadState::UploadCompleted(file_size),
+                                            );
+                                        }
+
+                                        {
+                                            let mut map = upload_status_map_clone.lock().unwrap();
+                                            map.insert(
+                                                upload_id_clone.clone(),
+                                                UploadState::DagImporting,
+                                            );
+                                        }
+                                        match perform_dag_import(&file_path).await {
+                                            Ok(_) => {
+                                                let mut map = upload_status_map_clone.lock().unwrap();
+                                                map.insert(
+                                                    upload_id_clone.clone(),
+                                                    UploadState::DagImportingComplete,
+                                                );
+                                                println!(
+                                                    "DAG import completed successfully for upload_id: {}",
+                                                    upload_id_clone
+                                                );
+                                            }
+                                            Err(e) => {
+                                                let mut map = upload_status_map_clone.lock().unwrap();
+                                                map.insert(
+                                                    upload_id_clone.clone(),
+                                                    UploadState::DagImportError(e.to_string()),
+                                                );
+                                                eprintln!(
+                                                    "DAG import failed for upload_id: {}: {}",
+                                                    upload_id_clone, e
+                                                );
+                                            }
+                                        }
+
+                                        let _ = async_std::fs::remove_file(
+                                            &upload_dir.with_extension("lock"),
+                                        )
+                                        .await;
+
+                                        println!(
+                                            "Download and DAG import completed successfully for upload_id: {} (Size: {} bytes)",
+                                            upload_id_clone, file_size
+                                        );
+                                    });
+
+                                    let json_response = json!({
+                                        "state": "upload_started",
+                                    });
+                                    let response = Response::builder()
+                                        .status(StatusCode::OK)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(json_response.to_string()))
+                                        .unwrap();
+                                    return Ok::<_, Infallible>(response);
+                                }
+                                Err(e) => {
+                                    if e.kind() == ErrorKind::AlreadyExists {
+                                        let json_response = json!({
+                                            "state": "upload_in_progress",
+                                        });
+                                        let response = Response::builder()
+                                            .status(StatusCode::OK)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(json_response.to_string()))
+                                            .unwrap();
+                                        return Ok::<_, Infallible>(response);
+                                    } else {
+                                        let json_error = json!({
+                                            "error": format!("Failed to create lock file: {}", e),
+                                        });
+                                        let response = Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .header("Content-Type", "application/json")
+                                            .body(Body::from(json_error.to_string()))
+                                            .unwrap();
+                                        return Ok::<_, Infallible>(response);
+                                    }
+                                }
+                            }
+                        }
+
+                        (hyper::Method::GET, ["publish_status", upload_id]) => {
+                            let upload_status_map_clone = upload_status_map.clone();
+                            let upload_id = upload_id.to_string();
+
+                            let map = upload_status_map_clone.lock().unwrap();
+                            if let Some(state) = map.get(&upload_id) {
+                                let json_response = match state {
+                                    UploadState::UploadStarted => {
+                                        json!({ "state": "upload_started" })
+                                    }
+                                    UploadState::UploadInProgress(size) => json!({
+                                       "state": "upload_in_progress",
+                                       "file_size": size
+                                    }),
+                                    UploadState::UploadCompleted(size) => json!({
+                                        "state": "upload_completed",
+                                        "file_size": size
+                                    }),
+                                    UploadState::DagImporting => json!({
+                                        "state": "dag_importing"
+                                    }),
+                                    UploadState::DagImportingComplete => json!({
+                                        "state": "dag_importing_complete"
+                                     }),
+                                    UploadState::DagImportError(err) =>json!({
+                                        "state": "dag_import_error",
+                                        "error": err,
+                                    }),
+                                    UploadState::UploadFailed(err) => json!({
+                                        "state": "upload_failed",
+                                        "error": err,
+                                    }),
+                                };
+                                let response = Response::builder()
+                                    .status(StatusCode::OK)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(json_response.to_string()))
+                                    .unwrap();
+                                Ok::<_, Infallible>(response)
+                            } else {
+                                let json_error = json!({
+                                    "error": "upload_id not found",
+                                });
+                                let response = Response::builder()
+                                    .status(StatusCode::NOT_FOUND)
+                                    .header("Content-Type", "application/json")
+                                    .body(Body::from(json_error.to_string()))
+                                    .unwrap();
+                                Ok::<_, Infallible>(response)
+                            }
+                        }
+
                         (hyper::Method::GET, ["health"]) => {
                             let json_request = r#"{"healthy": "true"}"#;
                             let response = Response::new(Body::from(json_request));
@@ -873,7 +1442,7 @@ fn upload_image_to_sqlite_db(
     let sqlite_connection = pool.get()?;
 
     sqlite_connection.execute(
-        "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data) 
+        "INSERT INTO preimages (hash_type, hash, created_at, storage_rent_paid_until, data)
                                VALUES (?, ?, ?, ?, ?)",
         params![
             preimage_data.0,
@@ -922,7 +1491,7 @@ struct AttestationUserData {
     user_data: String,
 }
 fn check_hash_format(hash: &str, error_message: &str) -> Result<(), Response<Body>> {
-    let hash_regex = Regex::new(r"^[a-f0-9]{64}$").unwrap();
+    let hash_regex = Regex::new(r"^[a-f0-9-]+$").unwrap();
 
     if !hash_regex.is_match(hash) {
         let json_error = serde_json::json!({
