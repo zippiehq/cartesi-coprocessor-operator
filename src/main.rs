@@ -125,7 +125,7 @@ async fn upload_car_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> 
 
 async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
     let url = "http://127.0.0.1:5001/api/v0/dag/import";
-    let boundary = "----MyBoundary123";
+    let boundary = "MyBoundary123";
 
     let file_path_str = match file_path.to_str() {
         Some(s) => s,
