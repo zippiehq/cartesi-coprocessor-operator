@@ -44,6 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::{convert::Infallible, net::SocketAddr};
 use std::{env, path::PathBuf};
+use std::error::Error;
 const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
@@ -68,7 +69,7 @@ enum UploadState {
     UploadFailed(String),
 }
 
-async fn upload_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn upload_car_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Open the file for streaming
     let file = File::open(file_path).await?;
     let mut reader = BufReader::new(file);
@@ -120,6 +121,17 @@ async fn upload_file_to_ipfs(file_path: &str, url: &str, boundary: &str) -> Resu
     println!("Response Body: {}", String::from_utf8_lossy(&body_bytes));
 
     Ok(())
+}
+
+async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
+    let url = "http://127.0.0.1:5001/api/v0/dag/import";
+    let boundary = "----MyBoundary123";
+
+    let file_path_str = match file_path.to_str() {
+        Some(s) => s,
+        None => return Err("Invalid file path".into()),
+    };
+    upload_car_file_to_ipfs(file_path_str, url, boundary).await
 }
 #[async_std::main]
 
