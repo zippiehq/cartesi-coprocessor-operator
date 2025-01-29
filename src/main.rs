@@ -70,19 +70,21 @@ enum UploadState {
 }
 
 async fn upload_car_file_to_ipfs(file_path: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let form = reqwest::multipart::Form::new().file("file", file_path).await;
-    if !form.is_ok() {
-        return Ok(());
-    }
+    let form = reqwest::multipart::Form::new()
+        .file("file", file_path)
+        .await
+        .map_err(|e| format!("Failed to create form: {}", e))?;
+
     let client = reqwest::Client::new();
-    let resp = client.post(url).multipart(form.unwrap()).send().await;
-    if resp.is_ok() {
-        return Ok(());
-    }
-    if resp.unwrap().status().is_success() {
-        return Ok(());
+    let resp = client.post(url)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    if resp.status().is_success() {
+        Ok(())
     } else {
-        return Ok(());
+        Err(format!("Failed to upload file: {}", resp.status()).into())
     }
 
 }
