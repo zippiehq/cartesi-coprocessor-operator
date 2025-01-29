@@ -324,8 +324,9 @@ pub(crate) async fn handle_classic(
             let llama_server_address = var("LLAMA_SERVER")?;
             let completion_http_request = Request::builder()
                 .method("POST")
-                .uri(format!("{}/completion", llama_server_address))
+                .uri(format!("{}/v1/chat/completions", llama_server_address))
                 .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer no-key")
                 .body(Body::from(input))
                 .unwrap();
 
