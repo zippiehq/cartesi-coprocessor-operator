@@ -1111,6 +1111,8 @@ async fn main() {
                                                 return;
                                             }
                                         }
+                                        file.flush().await.unwrap();
+                                        drop(file);
 
                                         let file_metadata =
                                             match async_std::fs::metadata(&file_path).await {
