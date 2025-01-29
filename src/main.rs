@@ -84,7 +84,7 @@ async fn upload_car_file_to_ipfs(file_path: &str, url: &str) -> Result<(), Box<d
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(format!("Failed to upload file: {}", resp.status()).into())
+        Err(format!("Failed to upload file: {} {}", resp.status(), resp.text().await.unwrap_or_default()).into())
     }
 
 }
