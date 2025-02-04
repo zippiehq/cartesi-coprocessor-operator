@@ -129,6 +129,9 @@ async fn main() {
     let client = Arc::new(client);
 
     let sqlite_connect = pool.get().unwrap();
+    sqlite_connect
+        .query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()))
+        .expect("Failed to set WAL mode");
     // Create table for requests
     sqlite_connect
         .execute(
