@@ -40,11 +40,12 @@ jobs:
           --cache-from type=gha,scope=build-${{ matrix.arch }} \
           --cache-to type=gha,mode=max,scope=build-${{ matrix.arch }} \
           --load
-        if [ "${{ github.ref }}" == refs/tags/v* ]; then
-          docker push ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-${{ github.ref_name }}
-        fi
       env:
        DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
+    - name: Push Image
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: |
+        docker push ${{ env.REGISTRY }}/${{ github.repository }}:${{ matrix.arch }}-${{ github.ref_name }}   
 
   manifest:
     name: Create and Push Multi-Architecture Manifest
@@ -62,7 +63,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Create and Push Docker Manifest
-        if: ${{ github.ref == 'refs/tags/v*'}}
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           docker pull --platform linux/amd64 ${{ env.REGISTRY }}/${{ github.repository }}:amd64-${{ github.ref_name }}
           docker pull --platform linux/arm64 ${{ env.REGISTRY }}/${{ github.repository }}:arm64-${{ github.ref_name }}
