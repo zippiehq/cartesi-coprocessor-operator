@@ -70,15 +70,17 @@ pub(crate) fn check_previously_handled_results(
         ])
         .unwrap();
     if let Some(statement) = rows.next().unwrap() {
-        println!("this request has been already handled");
-        *outputs_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
-        *reports_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
-        *finish_result = bincode::deserialize(&statement.get::<_, Vec<u8>>(3).unwrap()).ok();
-        *reason = match &statement.get::<_, i64>(4).unwrap() {
-            1 => Some(YieldManualReason::Accepted),
-            2 => Some(YieldManualReason::Rejected),
-            4 => Some(YieldManualReason::Exception),
-            _ => None,
+        if statement.get::<_, String>(9).is_err() {
+            println!("this request has been already handled");
+            *outputs_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
+            *reports_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
+            *finish_result = bincode::deserialize(&statement.get::<_, Vec<u8>>(3).unwrap()).ok();
+            *reason = match &statement.get::<_, i64>(4).unwrap() {
+                1 => Some(YieldManualReason::Accepted),
+                2 => Some(YieldManualReason::Rejected),
+                4 => Some(YieldManualReason::Exception),
+                _ => None,
+            }
         }
     }
 }
@@ -90,7 +92,7 @@ pub(crate) fn query_result_from_database(
     reports_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
-) {
+) -> Result<(), Box<dyn Error>> {
     // Query the result from the DB
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
@@ -99,16 +101,28 @@ pub(crate) fn query_result_from_database(
     let mut rows = statement.query([id]).unwrap();
 
     if let Some(statement) = rows.next().unwrap() {
-        *outputs_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
-        *reports_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
-        *finish_result = bincode::deserialize(&statement.get::<_, Vec<u8>>(3).unwrap()).ok();
-        *reason = match &statement.get::<_, i64>(4).unwrap() {
-            1 => Some(YieldManualReason::Accepted),
-            2 => Some(YieldManualReason::Rejected),
-            4 => Some(YieldManualReason::Exception),
-            _ => None,
+        match statement.get::<_, String>(9) {
+            Err(_) => {
+                *outputs_vector =
+                    bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
+                *reports_vector =
+                    bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
+                *finish_result =
+                    bincode::deserialize(&statement.get::<_, Vec<u8>>(3).unwrap()).ok();
+                *reason = match &statement.get::<_, i64>(4).unwrap() {
+                    1 => Some(YieldManualReason::Accepted),
+                    2 => Some(YieldManualReason::Rejected),
+                    4 => Some(YieldManualReason::Exception),
+                    _ => None,
+                };
+                return Ok(());
+            }
+            Ok(error_message) => {
+                return Err(Box::<dyn Error>::from(error_message));
+            }
         }
     }
+    return Ok(());
 }
 
 pub(crate) fn query_request_with_the_highest_priority(
@@ -160,16 +174,20 @@ pub(crate) async fn handle_database_request(
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
-    let response = handle_classic(classic_request).await.unwrap();
+    match handle_classic(classic_request).await {
+        Ok(response) => {
+            let reason = match response.1 {
+                YieldManualReason::Accepted => 1,
+                YieldManualReason::Rejected => 2,
+                YieldManualReason::Exception => 4,
+            };
 
-    let reason = match response.1 {
-        YieldManualReason::Accepted => 1,
-        YieldManualReason::Rejected => 2,
-        YieldManualReason::Exception => 4,
-    };
-
-    sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority])
-.unwrap();
+            sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority]).unwrap();
+        }
+        Err(err) => {
+            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string()]).unwrap();
+        }
+    }
     let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
         requests.lock().unwrap();
     match requests.remove(&classic_request.id) {
@@ -377,28 +395,36 @@ pub(crate) async fn handle_classic(
         Callback::Sync(Box::new(put_image_keccak256)),
     );
 
-    let reason = run_advance(
-        classic_request.machine_snapshot_path.clone(),
-        None,
-        classic_request.payload.clone(),
-        HashMap::new(),
-        &mut report_callback,
-        &mut output_callback,
-        &mut finish_callback,
-        callbacks,
-        no_console_putchar,
-    )
-    .await
-    .unwrap();
+    let machine_snapshot_path = Path::new(&classic_request.machine_snapshot_path);
+    if machine_snapshot_path.join("config.json").exists() {
+        let reason = run_advance(
+            classic_request.machine_snapshot_path.clone(),
+            None,
+            classic_request.payload.clone(),
+            HashMap::new(),
+            &mut report_callback,
+            &mut output_callback,
+            &mut finish_callback,
+            callbacks,
+            no_console_putchar,
+        )
+        .await
+        .unwrap();
 
-    Ok((
-        RunAdvanceResponses {
-            outputs_vector,
-            reports_vector,
-            finish_result,
-        },
-        reason,
-    ))
+        Ok((
+            RunAdvanceResponses {
+                outputs_vector,
+                reports_vector,
+                finish_result,
+            },
+            reason,
+        ))
+    } else {
+        return Err(Box::<dyn Error>::from(format!(
+            "No config.json file was found in: {:?}",
+            machine_snapshot_path
+        )));
+    }
 }
 
 #[derive(Debug)]
