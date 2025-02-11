@@ -41,14 +41,21 @@ async fn classic_request_test(payload: Vec<u8>) {
                 &to_bytes(classic_http_response.into_body())
                     .await
                     .unwrap()
-                    .to_vec()
+                    .to_vec(),
             )
             .unwrap();
             println!(
                 "outputs_callback_vector : {:?} ; reports_callback_vector : {:?}",
-                response.get("outputs_callback_vector").unwrap().as_array().unwrap(),
-                response.get("reports_callback_vector").unwrap().as_array().unwrap()
-
+                response
+                    .get("outputs_callback_vector")
+                    .unwrap()
+                    .as_array()
+                    .unwrap(),
+                response
+                    .get("reports_callback_vector")
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
             );
         }
         Err(e) => {
