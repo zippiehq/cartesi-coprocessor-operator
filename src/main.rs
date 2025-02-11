@@ -22,11 +22,11 @@ use hex::FromHexError;
 use hyper::body::to_bytes;
 use hyper::client::{self, HttpConnector};
 use hyper::header::HeaderValue;
+use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Uri;
 use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
 use hyper_tls::HttpsConnector;
-use hyper::header::CONTENT_TYPE;
 use ipfs_api_backend_hyper::IpfsApi;
 use r2d2::Pool;
 use regex::Regex;
@@ -36,6 +36,7 @@ use serde_json::json;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
@@ -44,20 +45,19 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::{convert::Infallible, net::SocketAddr};
 use std::{env, path::PathBuf};
-use std::error::Error;
 const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
+use async_std::fs::File;
+use async_std::io::BufReader;
+use async_std::io::ReadExt;
+use futures::stream;
 use r2d2_sqlite::rusqlite::params;
 use r2d2_sqlite::SqliteConnectionManager;
 #[cfg(feature = "bls_signing")]
 use signer_eigen::SignerEigen;
-use std::sync::Condvar;
-use async_std::fs::File;
-use async_std::io::BufReader;
 use std::fs::File as OtherFile;
-use async_std::io::ReadExt;
-use futures::stream;
+use std::sync::Condvar;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 enum UploadState {
     UploadStarted,
@@ -69,14 +69,18 @@ enum UploadState {
     UploadFailed(String),
 }
 
-async fn upload_car_file_to_ipfs(file_path: &str, url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn upload_car_file_to_ipfs(
+    file_path: &str,
+    url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let form = reqwest::multipart::Form::new()
         .file("file", file_path)
         .await
         .map_err(|e| format!("Failed to create form: {}", e))?;
 
     let client = reqwest::Client::new();
-    let resp = client.post(url)
+    let resp = client
+        .post(url)
         .multipart(form)
         .send()
         .await
@@ -84,9 +88,13 @@ async fn upload_car_file_to_ipfs(file_path: &str, url: &str) -> Result<(), Box<d
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(format!("Failed to upload file: {} {}", resp.status(), resp.text().await.unwrap_or_default()).into())
+        Err(format!(
+            "Failed to upload file: {} {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        )
+        .into())
     }
-
 }
 
 async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
@@ -172,15 +180,16 @@ async fn main() {
         .execute(
             "
             CREATE TABLE IF NOT EXISTS results (
-            id INTEGER PRIMARY KEY NOT NULL,
-            outputs_vector BLOB NOT NULL,
-            reports_vector BLOB NOT NULL,
-            finish_result BLOB NOT NULL,
-            reason INTEGER CHECK (reason IN (1, 2, 4)) NOT NULL,
+            id                    INTEGER PRIMARY KEY NOT NULL,
+            outputs_vector        BLOB,
+            reports_vector        BLOB,
+            finish_result         BLOB,
+            reason                INTEGER CHECK (reason IN (1, 2, 4)),
             machine_snapshot_path TEXT NOT NULL,
-            payload BLOB NOT NULL,
-            no_console_putchar INTEGER CHECK (no_console_putchar IN (1, 0)) NOT NULL,
-            priority INTEGER NOT NULL
+            payload               BLOB NOT NULL,
+            no_console_putchar    INTEGER CHECK (no_console_putchar IN (1, 0)) NOT NULL,
+            priority              INTEGER,
+            error_message         TEXT
             );",
             params![],
         )
@@ -375,14 +384,27 @@ async fn main() {
                                     // Wait for request to be handled
                                     let id = receiver.await.unwrap();
                                     let sqlite_connection = pool.get().unwrap();
-                                    query_result_from_database(
+                                    if let Err(error_message) = query_result_from_database(
                                         sqlite_connection,
                                         &id,
                                         &mut outputs_vector,
                                         &mut reports_vector,
                                         &mut finish_result,
                                         &mut reason,
-                                    );
+                                    ) {
+                                        let json_error = serde_json::json!({
+                                            "error": error_message.to_string(),
+                                        });
+                                        let json_error =
+                                            serde_json::to_string(&json_error).unwrap();
+
+                                        let response = Response::builder()
+                                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                            .body(Body::from(json_error))
+                                            .unwrap();
+
+                                        return Ok::<_, Infallible>(response);
+                                    }
                                 }
                             }
                             let mut keccak_outputs = Vec::new();
@@ -865,10 +887,9 @@ async fn main() {
 
                             // is the upload id format check necessary?
 
-                            if let Err(err_response) = check_hash_format(
-                                &upload_id,
-                                "upload_id invalid format",
-                            ) {
+                            if let Err(err_response) =
+                                check_hash_format(&upload_id, "upload_id invalid format")
+                            {
                                 return Ok(err_response);
                             }
 
@@ -1000,20 +1021,21 @@ async fn main() {
                                             Err(e) => {
                                                 eprintln!("Failed to parse presigned URL: {}", e);
                                                 {
-                                                    let mut map = upload_status_map_clone.lock().unwrap();
+                                                    let mut map =
+                                                        upload_status_map_clone.lock().unwrap();
                                                     map.insert(
                                                         upload_id_clone.clone(),
-                                                        UploadState::UploadFailed(format!("Failed to parse presigned URL: {}", e)),
+                                                        UploadState::UploadFailed(format!(
+                                                            "Failed to parse presigned URL: {}",
+                                                            e
+                                                        )),
                                                     );
                                                 }
                                                 return;
                                             }
                                         };
 
-                                        let response = match client
-                                            .get(uri)
-                                            .await
-                                        {
+                                        let response = match client.get(uri).await {
                                             Ok(resp) => resp,
                                             Err(e) => {
                                                 eprintln!("Failed to send GET request: {}", e);
@@ -1163,7 +1185,8 @@ async fn main() {
                                         }
                                         match perform_dag_import(&file_path).await {
                                             Ok(_) => {
-                                                let mut map = upload_status_map_clone.lock().unwrap();
+                                                let mut map =
+                                                    upload_status_map_clone.lock().unwrap();
                                                 map.insert(
                                                     upload_id_clone.clone(),
                                                     UploadState::DagImportingComplete,
@@ -1174,7 +1197,8 @@ async fn main() {
                                                 );
                                             }
                                             Err(e) => {
-                                                let mut map = upload_status_map_clone.lock().unwrap();
+                                                let mut map =
+                                                    upload_status_map_clone.lock().unwrap();
                                                 map.insert(
                                                     upload_id_clone.clone(),
                                                     UploadState::DagImportError(e.to_string()),
@@ -1255,9 +1279,9 @@ async fn main() {
                                         "state": "dag_importing"
                                     }),
                                     UploadState::DagImportingComplete => json!({
-                                        "state": "dag_importing_complete"
-                                     }),
-                                    UploadState::DagImportError(err) =>json!({
+                                       "state": "dag_importing_complete"
+                                    }),
+                                    UploadState::DagImportError(err) => json!({
                                         "state": "dag_import_error",
                                         "error": err,
                                     }),
