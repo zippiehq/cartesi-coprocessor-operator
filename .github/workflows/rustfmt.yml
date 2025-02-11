@@ -1,0 +1,32 @@
+name: Rust Format Check
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - '*' 
+
+jobs:
+  check_format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install/update rustfmt
+        run: |
+          rustup update
+          rustup component add rustfmt 
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Check formatting in requests-test directory
+        run: |
+         cd requests-test
+         cargo fmt -- --check
+
+      - name: Check formatting in setup-operator directory
+        run: |
+          cd setup-operator
+          cargo fmt -- --check
