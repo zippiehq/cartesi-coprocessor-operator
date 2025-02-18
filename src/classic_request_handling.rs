@@ -11,6 +11,7 @@ use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
 use rusqlite::params;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -25,6 +26,8 @@ const GET_ACCOUNT_GIO: u32 = 0x29;
 const GET_IMAGE_GIO: u32 = 0x2a;
 const LLAMA_COMPLETION_GIO: u32 = 0x2b;
 const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
+const PUT_IMAGE_SHA256_GIO: u32 = 0x2d;
+
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
@@ -384,6 +387,26 @@ pub(crate) async fn handle_classic(
         }
     };
 
+    let put_image_sha256 = {
+        let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
+        move |reason: u16, input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
+            if input.len() > (256 * 1024) {
+                return Err(Box::<dyn Error>::from("The input is too big"));
+            }
+
+            let preimage_hash = {
+                let mut hasher = Sha256::new();
+                hasher.update(&input);
+                hasher.finalize().to_vec()
+            };
+
+            let preimage = (1, preimage_hash, input);
+
+            upload_image_to_sqlite_db(&pool, &preimage)?;
+            return Ok(vec![]);
+        }
+    };
+
     let mut callbacks = HashMap::new();
     callbacks.insert(GET_STORAGE_GIO, Callback::Async(get_storage));
     callbacks.insert(GET_CODE_GIO, Callback::Async(get_code));
@@ -393,6 +416,10 @@ pub(crate) async fn handle_classic(
     callbacks.insert(
         PUT_IMAGE_KECCAK256_GIO,
         Callback::Sync(Box::new(put_image_keccak256)),
+    );
+    callbacks.insert(
+        PUT_IMAGE_SHA256_GIO,
+        Callback::Sync(Box::new(put_image_sha256)),
     );
 
     let machine_snapshot_path = Path::new(&classic_request.machine_snapshot_path);
