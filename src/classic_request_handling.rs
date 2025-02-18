@@ -412,7 +412,12 @@ pub(crate) async fn handle_classic(
     callbacks.insert(GET_CODE_GIO, Callback::Async(get_code));
     callbacks.insert(GET_ACCOUNT_GIO, Callback::Async(get_account));
     callbacks.insert(GET_IMAGE_GIO, Callback::Sync(Box::new(get_preimage)));
-    callbacks.insert(LLAMA_COMPLETION_GIO, Callback::Async(completion));
+
+    // Only include LLAMA completion if NO_LLAMA is not set
+    if std::env::var("NO_LLAMA").is_err() {
+        callbacks.insert(LLAMA_COMPLETION_GIO, Callback::Async(completion));
+    }
+
     callbacks.insert(
         PUT_IMAGE_KECCAK256_GIO,
         Callback::Sync(Box::new(put_image_keccak256)),
