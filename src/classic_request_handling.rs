@@ -4,13 +4,17 @@ use advance_runner::{run_advance, Callback};
 use alloy_primitives::Keccak256;
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
-use alloy_rpc_types_eth::{BlockId, RpcBlockHash};
+use alloy_rlp::BufMut;
+use alloy_rlp::Encodable;
+use alloy_rpc_types_eth::{BlockId, BlockTransactionsKind, RpcBlockHash};
+
 use futures_channel::oneshot::Sender;
 use hyper::{body::to_bytes, Body, Client, Request};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
 use rusqlite::params;
+use serde_json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
@@ -21,12 +25,16 @@ use std::sync::{Arc, Mutex};
 use std::{env::var, error::Error, vec};
 
 const GET_STORAGE_GIO: u32 = 0x27;
-const GET_CODE_GIO: u32 = 0x28;
+const _GET_CODE_GIO: u32 = 0x28; // unused
 const GET_ACCOUNT_GIO: u32 = 0x29;
 const GET_IMAGE_GIO: u32 = 0x2a;
 const LLAMA_COMPLETION_GIO: u32 = 0x2b;
 const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
 const PUT_IMAGE_SHA256_GIO: u32 = 0x2d;
+const PREIMAGE_HINT_GIO: u32 = 0x2e;
+
+const HINT_ETH_CODE_PREIMAGE: u16 = 1;
+const HINT_ETH_BLOCK_PREIMAGE: u16 = 2;
 
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
@@ -257,29 +265,6 @@ pub(crate) async fn handle_classic(
         })
     });
 
-    let get_code: Box<
-        dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
-    > = Box::new(|reason: u16, input: Vec<u8>| {
-        Box::pin(async move {
-            let block_hash: [u8; 32] = input[0..32].try_into()?;
-            let address: [u8; 20] = input[32..53].try_into()?;
-            let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
-                .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
-            let address = Address::from(address);
-            let get_code_request = ProviderBuilder::new()
-                .on_http(Url::parse(&ethereum_endpoint)?)
-                .get_code_at(address);
-            let code_bytes = get_code_request
-                .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
-                    &block_hash,
-                ))))
-                .await?;
-
-            let result: Result<Vec<u8>, Box<dyn Error>> = Ok(code_bytes.to_vec());
-            return result;
-        })
-    });
-
     let get_account: Box<
         dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
     > = Box::new(|reason: u16, input: Vec<u8>| {
@@ -301,6 +286,8 @@ pub(crate) async fn handle_classic(
             let result: Result<Vec<u8>, Box<dyn Error>> = Ok([
                 account.balance.to_be_bytes_vec(),
                 account.nonce.to_be_bytes().to_vec(),
+                account.code_hash.to_vec(),
+                account.storage_root.to_vec(),
             ]
             .concat());
             return result;
@@ -407,11 +394,90 @@ pub(crate) async fn handle_classic(
         }
     };
 
+    let preimage_hint: Box<
+        dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
+    > = Box::new(|hint_type: u16, input: Vec<u8>| {
+        Box::pin(async move {
+            match hint_type {
+                HINT_ETH_CODE_PREIMAGE => {
+                    let block_hash: [u8; 32] = input[0..32].try_into()?;
+                    let address: [u8; 20] = input[32..52].try_into()?;
+
+                    let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
+                        .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
+                    let address = Address::from(address);
+                    let get_code_request = ProviderBuilder::new()
+                        .on_http(Url::parse(&ethereum_endpoint)?)
+                        .get_code_at(address);
+                    let code_bytes = get_code_request
+                        .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                            &block_hash,
+                        ))))
+                        .await?;
+
+                    // Calculate keccak256 hash of the code
+                    let mut hasher = Keccak256::new();
+                    hasher.update(&code_bytes);
+                    let code_hash = hasher.finalize().to_vec();
+
+                    // Store in preimage database with hash type 2 (KECCAK256)
+                    let preimage = (2, code_hash.clone(), code_bytes.to_vec());
+                    let db_directory = std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
+                    let manager =
+                        SqliteConnectionManager::file(Path::new(&db_directory).join("requests.db"));
+                    let pool = r2d2::Pool::new(manager).unwrap();
+                    upload_image_to_sqlite_db(&pool, &preimage)?;
+
+                    Ok(vec![])
+                }
+                HINT_ETH_BLOCK_PREIMAGE => {
+                    let block_hash: [u8; 32] = input[0..32].try_into()?;
+
+                    let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
+                        .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
+                    let block = ProviderBuilder::new()
+                        .on_http(Url::parse(&ethereum_endpoint)?)
+                        .get_block(
+                            BlockId::Hash(RpcBlockHash::from(FixedBytes::from(&block_hash))),
+                            BlockTransactionsKind::Hashes,
+                        )
+                        .await?;
+
+                    if let Some(block) = block {
+                        // Get the RLP encoded block header
+                        let mut block_bytes = vec![];
+                        block.header.encode(&mut block_bytes);
+
+                        // Calculate keccak256 hash of the RLP encoded block header
+                        let mut hasher = Keccak256::new();
+                        hasher.update(&block_bytes);
+                        let block_hash = hasher.finalize().to_vec();
+
+                        // Store in preimage database with hash type 2 (KECCAK256)
+                        let preimage = (2, block_hash.clone(), block_bytes.to_vec());
+                        let db_directory =
+                            std::env::var("DB_DIRECTORY").unwrap_or(String::from(""));
+                        let manager = SqliteConnectionManager::file(
+                            Path::new(&db_directory).join("requests.db"),
+                        );
+                        let pool = r2d2::Pool::new(manager).unwrap();
+                        upload_image_to_sqlite_db(&pool, &preimage)?;
+
+                        Ok(vec![])
+                    } else {
+                        Err(Box::<dyn Error>::from("Block not found"))
+                    }
+                }
+                _ => Err(Box::<dyn Error>::from("Unsupported hint type")),
+            }
+        })
+    });
+
     let mut callbacks = HashMap::new();
     callbacks.insert(GET_STORAGE_GIO, Callback::Async(get_storage));
-    callbacks.insert(GET_CODE_GIO, Callback::Async(get_code));
     callbacks.insert(GET_ACCOUNT_GIO, Callback::Async(get_account));
     callbacks.insert(GET_IMAGE_GIO, Callback::Sync(Box::new(get_preimage)));
+    callbacks.insert(PREIMAGE_HINT_GIO, Callback::Async(preimage_hint));
 
     // Only include LLAMA completion if NO_LLAMA is not set
     if std::env::var("NO_LLAMA").is_err() {
