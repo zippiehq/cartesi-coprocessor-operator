@@ -246,20 +246,23 @@ pub(crate) async fn handle_classic(
     > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
             let block_hash: [u8; 32] = input[0..32].try_into()?;
-            let address: [u8; 20] = input[32..53].try_into()?;
-            let storage_slot: [u8; 32] = input[53..86].try_into()?;
+            let address: [u8; 20] = input[32..52].try_into()?; 
+            let storage_slot: [u8; 32] = input[52..84].try_into()?;
 
             let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
                 .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
+
             let address = Address::from(address);
             let get_storage_request = ProviderBuilder::new()
                 .on_http(Url::parse(&ethereum_endpoint)?)
                 .get_storage_at(address, U256::from_be_bytes(storage_slot));
+
             let storage = get_storage_request
                 .block_id(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
                     &block_hash,
                 ))))
                 .await?;
+
             let result: Result<Vec<u8>, Box<dyn Error>> = Ok(storage.to_be_bytes_vec());
             return result;
         })
