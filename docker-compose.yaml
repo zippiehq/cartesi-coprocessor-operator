@@ -23,7 +23,7 @@ services:
       - "4001:4001/udp"
       - "4001:4001/tcp"
       - "3033:3033/tcp"
-    image: ghcr.io/henriquemarlon/cartesi-coprocessor-operator:latest
+    image: ghcr.io/zippiehq/cartesi-coprocessor-operator:latest
     container_name: coprocessor-operator1
     volumes:
       - ./operator1-ipfs:/data
