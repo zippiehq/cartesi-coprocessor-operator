@@ -35,8 +35,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use core::hash;
 use std::collections::HashMap;
 use std::error::Error;
+use tracing::{info, error, debug, instrument};
 use std::fs;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
@@ -69,14 +71,19 @@ enum UploadState {
     UploadFailed(String),
 }
 
+#[instrument]
 async fn upload_car_file_to_ipfs(
     file_path: &str,
     url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    info!("Starting to upload car file to ipfs: {:?}", file_path);
     let form = reqwest::multipart::Form::new()
         .file("file", file_path)
         .await
-        .map_err(|e| format!("Failed to create form: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to create form: {}", e);
+            format!("Failed to create form: {}", e)
+        })?;
 
     let client = reqwest::Client::new();
     let resp = client
@@ -84,10 +91,21 @@ async fn upload_car_file_to_ipfs(
         .multipart(form)
         .send()
         .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
+        .map_err(|e| {
+            error!("Failed to send request: {}", e);
+            format!("Failed to send request: {}", e)
+        })?; 
     if resp.status().is_success() {
+        info!("Successfully uploaded file");
         Ok(())
+       
     } else {
+        error!(
+            "Failed to upload file: {} {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+
         Err(format!(
             "Failed to upload file: {} {}",
             resp.status(),
@@ -97,7 +115,10 @@ async fn upload_car_file_to_ipfs(
     }
 }
 
+#[instrument]
 async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
+    info!("Starting DAG import for file: {:?}", file_path);
+
     let url = "http://127.0.0.1:5001/api/v0/dag/import";
 
     let file_path_str = match file_path.to_str() {
@@ -1336,18 +1357,29 @@ async fn main() {
     println!("Server is listening on {}", addr);
     server.await.unwrap();
 }
+
+#[instrument]
 fn check_preimage_hash(
     hash_type: &u8,
     hash: &Vec<u8>,
     data: &Vec<u8>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    info!(
+        "Checking hash match: hash_type = {}, hash_len = {}, data_len = {}",
+        hash_type,
+        hash.len(),
+        data.len()
+    );
+
     if hash_type == &(HashType::SHA256 as u8) {
         let mut hasher = Sha256::new();
         hasher.update(data);
         let result = hasher.finalize();
         if &result.to_vec() == hash {
+            info!("sha256of the data and the hash successful match");
             return Ok(());
         } else {
+            error!("sha256 of the data and the hash don't match");
             return Err(Box::<dyn std::error::Error>::from(
                 "sha256 of the data and the hash don't match",
             ));
@@ -1359,8 +1391,10 @@ fn check_preimage_hash(
         hasher.update(data);
         let result = hasher.finalize();
         if &result.to_vec() == hash {
+            info!("keccak256 of the data and the hash successful match");
             return Ok(());
         } else {
+            error!("keccak256 of the data and the hash don't match");
             return Err(Box::<dyn std::error::Error>::from(
                 "keccak256 of the data and the hash don't match",
             ));
@@ -1369,37 +1403,50 @@ fn check_preimage_hash(
     if hash_type == &(HashType::ESPRESSO_TX as u8) {
         let espresso_transaction: EspressoTransaction = bincode::deserialize(&data)?;
         if &espresso_transaction.commit().into_bits().into_vec() == hash {
+            info!("Espresso transaction hash match successful");
             return Ok(());
         } else {
+            error!("espresso transaction of the data and the hash don't match");
             return Err(Box::<dyn std::error::Error>::from(
                 "espresso transaction of the data and the hash don't match",
             ));
         }
     }
+    let span = error_span!("unsupported_hash_type");
+    let _guard = span.enter();
+    error!("Sent hash type isn't supported");
     return Err(Box::<dyn std::error::Error>::from(
         "sent hash type isn't supported",
     ));
 }
-
+#[instrument]
 fn preimage_available(
     pool: &Pool<SqliteConnectionManager>,
     hash_type_and_data: &(u8, Vec<u8>),
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let sqlite_connection = pool.get()?;
+    info!(
+        "Checking preimage availability: hash_type = {}, hash_len = {}",
+        hash_type,
+        hash.len()
+    );
 
+    let sqlite_connection = pool.get()?;
     let mut statement = sqlite_connection.prepare(
         "SELECT storage_rent_paid_until FROM preimages WHERE hash_type = ? AND hash = ?;",
     )?;
 
     let mut rows = statement.query(params![hash_type_and_data.0, hash_type_and_data.1])?;
     if let Some(statement) = rows.next()? {
+        info!("Database record found");
         return Ok(Utc::now().timestamp() < statement.get::<_, i64>(0)?);
     } else {
+        error!("database record not found");
         return Err(Box::<dyn std::error::Error>::from(
             "database record wasn't found",
         ));
     }
 }
+
 fn record_exists(
     pool: &Pool<SqliteConnectionManager>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
@@ -1418,14 +1465,24 @@ fn record_exists(
     }
     return false;
 }
+#[instrument]
 fn upload_image_to_sqlite_db(
     pool: &Pool<SqliteConnectionManager>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
 ) -> Result<(), Box<dyn std::error::Error>> {
+
+    let (hash_type, hash, data)=preimage_data;
+    info!(
+        "uploading image to sqlite db: hash_type = {}, hash_len = {}, data_len = {}",
+        hash_type,
+        hash.len(),
+        data.len()
+    );
     if !(preimage_data.0 == HashType::SHA256 as u8
         || preimage_data.0 == HashType::KECCAK256 as u8
         || preimage_data.0 == HashType::ESPRESSO_TX as u8)
     {
+        error!("sent hash type isn't supported");
         return Err(Box::<dyn std::error::Error>::from(
             "sent hash type isn't supported",
         ));
@@ -1446,6 +1503,7 @@ fn upload_image_to_sqlite_db(
             preimage_data.2
         ],
     )?;
+    info!("sent hash type is successful supported");
     return Ok(());
 }
 
