@@ -246,7 +246,7 @@ pub(crate) async fn handle_classic(
     > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
             let block_hash: [u8; 32] = input[0..32].try_into()?;
-            let address: [u8; 20] = input[32..52].try_into()?; 
+            let address: [u8; 20] = input[32..52].try_into()?;
             let storage_slot: [u8; 32] = input[52..84].try_into()?;
 
             let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
