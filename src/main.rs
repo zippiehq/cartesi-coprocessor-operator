@@ -25,9 +25,10 @@ use hyper::header::HeaderValue;
 use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Uri;
-use hyper::{Body, Client, Method, Request, Response, Server, StatusCode};
+use hyper::{header, Body, Client, Method, Request, Response, Server, StatusCode};
 use hyper_tls::HttpsConnector;
 use ipfs_api_backend_hyper::IpfsApi;
+use log::info;
 use r2d2::Pool;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
@@ -40,11 +41,15 @@ use std::error::Error;
 use std::fs;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
+use std::io::Write;
 use std::path::Path;
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 use std::{convert::Infallible, net::SocketAddr};
 use std::{env, path::PathBuf};
+
 const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
@@ -106,6 +111,60 @@ async fn perform_dag_import(file_path: &Path) -> Result<(), Box<dyn Error>> {
     };
     upload_car_file_to_ipfs(file_path_str, url).await
 }
+
+fn setup_logging() {
+    env_logger::Builder::from_default_env()
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} {} [{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .init();
+
+    std::io::stdout().flush().unwrap_or_else(|e| {
+        eprintln!("Failed to flush stdout: {}", e);
+    });
+}
+
+async fn log_and_return(
+    response: Response<Body>,
+    remote_addr: SocketAddr,
+    method: hyper::Method,
+    path: String,
+    version: hyper::Version,
+    start: std::time::Instant,
+) -> Result<Response<Body>, Infallible> {
+    let content_length = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|hv| hv.to_str().ok())
+        .unwrap_or("-");
+
+    let log_message = format!(
+        "{} - - \"{}{}{}\" {} {}",
+        remote_addr.ip(),
+        method,
+        path,
+        match version {
+            hyper::Version::HTTP_10 => " HTTP/1.0",
+            hyper::Version::HTTP_11 => " HTTP/1.1",
+            hyper::Version::HTTP_2 => " HTTP/2.0",
+            hyper::Version::HTTP_3 => " HTTP/3.0",
+            _ => " HTTP/?.?",
+        },
+        response.status().as_u16(),
+        content_length
+    );
+
+    log::info!("{} ", log_message);
+
+    Ok(response)
+}
 #[async_std::main]
 
 async fn main() {
@@ -113,6 +172,8 @@ async fn main() {
     // const UPLOAD_IN_PROGRESS: &str = "upload_in_progress";
     // const UPLOAD_COMPLETED: &str = "upload_completed";
     // const UPLOAD_FAILED: &str = "upload_failed";
+
+    setup_logging();
 
     let upload_status_map = Arc::new(Mutex::new(HashMap::<String, UploadState>::new()));
 
@@ -247,13 +308,15 @@ async fn main() {
         }
     });
 
-    let service = make_service_fn(|_| {
+    let service = make_service_fn(|conn: &hyper::server::conn::AddrStream| {
         let requests = requests.clone();
         let pool = pool.clone();
         let new_record = new_record.clone();
 
         let upload_status_map = upload_status_map_clone.clone();
         let client = client.clone();
+
+        let remote_addr = conn.remote_addr();
 
         async move {
             Ok::<_, Infallible>(service_fn(move |req| {
@@ -262,10 +325,17 @@ async fn main() {
                 let pool = pool.clone();
                 let new_record = new_record.clone();
                 let upload_status_map = upload_status_map.clone();
+                let start = Instant::now();
+                let method = req.method().clone();
+                let version = req.version();
+                let path = req.uri().path().to_owned();
+                let remote_addr = remote_addr;
+                let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
                 async move {
                     let path = req.uri().path().to_owned();
                     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-                    match (req.method().clone(), &segments as &[&str]) {
+
+                    let response = match (req.method().clone(), &segments as &[&str]) {
                         (hyper::Method::POST, ["classic", machine_hash]) => {
                             // Check machine_hash format
                             if let Err(err_response) = check_hash_format(
@@ -1326,7 +1396,17 @@ async fn main() {
 
                             return Ok::<_, Infallible>(response);
                         }
-                    }
+                    };
+
+                    return log_and_return(
+                        response.unwrap(),
+                        remote_addr,
+                        method,
+                        path,
+                        version,
+                        start,
+                    )
+                    .await;
                 }
             }))
         }
