@@ -23,6 +23,7 @@ use std::pin::Pin;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
 use std::{env::var, error::Error, vec};
+use tracing::{debug, error, info_span, instrument, trace, warn};
 
 const GET_STORAGE_GIO: u32 = 0x27;
 const _GET_CODE_GIO: u32 = 0x28; // unused
@@ -45,10 +46,15 @@ pub(crate) fn add_request_to_database(
     no_console_putchar: &bool,
     priority: &i64,
 ) {
+    tracing::info!("Starting to add request to database");
     let no_console_putchar: i64 = match no_console_putchar {
         true => 1,
         false => 0,
     };
+    tracing::info!(
+        "Inserting request into database: machine_snapshot_path={:?}, payload_length={}, no_console_putchar={}, priority={}",
+        machine_snapshot_path, payload.len(), no_console_putchar, priority
+    );
     // Write down new request to the DB
     let id: i64  = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)
 ).unwrap();
@@ -66,6 +72,9 @@ pub(crate) fn check_previously_handled_results(
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) {
+    tracing::info!("Checking previously handled results for machine_snapshot_path={:?}, payload_length={}, no_console_putchar={}, priority={}",
+        machine_snapshot_path, payload.len(), no_console_putchar, priority
+    );
     let mut statement = sqlite_connection
     .prepare(
         "SELECT * FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ?;",
@@ -82,6 +91,7 @@ pub(crate) fn check_previously_handled_results(
         .unwrap();
     if let Some(statement) = rows.next().unwrap() {
         if statement.get::<_, String>(9).is_err() {
+            tracing::info!("this request has been already handled");
             println!("this request has been already handled");
             *outputs_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
             *reports_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
@@ -104,6 +114,7 @@ pub(crate) fn query_result_from_database(
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) -> Result<(), Box<dyn Error>> {
+    tracing::info!(id = ?id, "Starting database query");
     // Query the result from the DB
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
@@ -129,13 +140,16 @@ pub(crate) fn query_result_from_database(
                 return Ok(());
             }
             Ok(error_message) => {
+                tracing::error!(id = ?id, error = ?error_message, "Database query error occurred");
                 return Err(Box::<dyn Error>::from(error_message));
             }
         }
     }
+    tracing::info!(id = ?id, "No results found in database");
     return Ok(());
 }
 
+#[instrument(skip(sqlite_connection, new_record), fields(waiting_for_data = false))]
 pub(crate) fn query_request_with_the_highest_priority(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     new_record: Arc<(Mutex<bool>, Condvar)>,
@@ -167,6 +181,7 @@ pub(crate) fn query_request_with_the_highest_priority(
                 priority: statement.get(4).unwrap(),
             };
         } else {
+            tracing::info!("Waiting for new data to comme in");
             println!("Waiting for new data to come in");
             let (lock, cvar) = &*new_record;
             let mut record = lock.lock().unwrap();
@@ -185,6 +200,10 @@ pub(crate) async fn handle_database_request(
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
+    tracing::info!(
+        request_id = classic_request.id,
+        "Starting database request handling"
+    );
     match handle_classic(classic_request).await {
         Ok(response) => {
             let reason = match response.1 {
@@ -193,9 +212,20 @@ pub(crate) async fn handle_database_request(
                 YieldManualReason::Exception => 4,
             };
 
+            tracing::debug!(
+                request_id = classic_request.id,
+                reason = reason,
+                "Inserting successful result into database"
+            );
+
             sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority]).unwrap();
         }
         Err(err) => {
+            tracing::error!(
+                request_id = classic_request.id,
+                "Error handling classic request: {}",
+                err
+            );
             sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string()]).unwrap();
         }
     }
@@ -213,6 +243,7 @@ pub(crate) async fn handle_database_request(
 pub(crate) async fn handle_classic(
     classic_request: &ClassicRequest,
 ) -> Result<(RunAdvanceResponses, YieldManualReason), Box<dyn Error>> {
+    tracing::info!("Handling classic request");
     let no_console_putchar = match classic_request.no_console_putchar {
         0 => false,
         1 => true,
@@ -225,17 +256,32 @@ pub(crate) async fn handle_classic(
     let mut reports_vector: Vec<(u16, Vec<u8>)> = Vec::new();
     let mut finish_result: (u16, Vec<u8>) = (0, vec![0]);
     let mut output_callback = |reason: u16, payload: &[u8]| {
+        tracing::info!(
+            "Output callback called with reason: {}, payload: {:?}",
+            reason,
+            payload
+        );
         let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         outputs_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
 
     let mut report_callback = |reason: u16, payload: &[u8]| {
+        tracing::info!(
+            "Report callback called with reason: {}, payload: {:?}",
+            reason,
+            payload
+        );
         let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         reports_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
     let mut finish_callback = |reason: u16, payload: &[u8]| {
+        tracing::info!(
+            "Finish callback called with reason: {}, payload: {:?}",
+            reason,
+            payload
+        );
         let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         finish_result = result.as_mut().unwrap().clone();
         return result;
@@ -304,6 +350,11 @@ pub(crate) async fn handle_classic(
     let get_preimage = {
         let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
         move |reason: u16, mut input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
+            tracing::info!(
+                "get_preimage called with reason: {}, input length: {}",
+                reason,
+                input.len()
+            );
             let sqlite_connection = pool.get()?;
             let hash_type = input.remove(0);
             let data = input;
@@ -316,6 +367,7 @@ pub(crate) async fn handle_classic(
                 // Query data from the database and return it
                 return Ok(statement.get::<_, Vec<u8>>(4)?);
             }
+            tracing::error!("No matching entry found in database.");
             return Err(Box::<dyn Error>::from(
                 "No data found with such hash and hash type",
             ));
@@ -327,10 +379,12 @@ pub(crate) async fn handle_classic(
     > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
             if input.len() > 0x100000 {
+                tracing::error!("Input shouldn't be larger than 1 mb.");
                 return Err(Box::<dyn Error>::from(
                     "Input shouldn't be larger than 1 mb.",
                 ));
             }
+            tracing::debug!("completition input {:?}", input.clone());
             println!("completition input {:?}", input.clone());
             let llama_server_address = var("LLAMA_SERVER")?;
             let completion_http_request = Request::builder()
@@ -348,6 +402,7 @@ pub(crate) async fn handle_classic(
                     return Ok(to_bytes(completion_response.into_body()).await?.to_vec());
                 }
                 Err(e) => {
+                    tracing::error!("Error querying completion request: {:?}", e);
                     return Err(Box::<dyn Error>::from(format!(
                         "Error querying completion request: {:?}",
                         e
@@ -361,6 +416,7 @@ pub(crate) async fn handle_classic(
         let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
         move |reason: u16, input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
             if input.len() > (256 * 1024) {
+                tracing::error!("The input is too big");
                 return Err(Box::<dyn Error>::from("The input is too big"));
             }
 
@@ -380,7 +436,13 @@ pub(crate) async fn handle_classic(
     let put_image_sha256 = {
         let pool: r2d2::Pool<SqliteConnectionManager> = pool.clone();
         move |reason: u16, input: Vec<u8>| -> Result<Vec<u8>, Box<dyn Error>> {
+            tracing::info!(
+                "put_image_sha256 called with reason: {}, input size: {}",
+                reason,
+                input.len()
+            );
             if input.len() > (256 * 1024) {
+                tracing::error!("The input is too big: {} bytes", input.len());
                 return Err(Box::<dyn Error>::from("The input is too big"));
             }
 
@@ -393,6 +455,7 @@ pub(crate) async fn handle_classic(
             let preimage = (1, preimage_hash, input);
 
             upload_image_to_sqlite_db(&pool, &preimage)?;
+            tracing::info!("Preimage successfully uploaded to database.");
             return Ok(vec![]);
         }
     };
@@ -447,6 +510,7 @@ pub(crate) async fn handle_classic(
                         .await?;
 
                     if let Some(block) = block {
+                        tracing::info!("Get the RLP encoded block header");
                         // Get the RLP encoded block header
                         let mut block_bytes = vec![];
                         block.header.encode(&mut block_bytes);
@@ -456,6 +520,7 @@ pub(crate) async fn handle_classic(
                         hasher.update(&block_bytes);
                         let block_hash = hasher.finalize().to_vec();
 
+                        tracing::info!("Store in preimage database with hash type 2 (KECCAK256)");
                         // Store in preimage database with hash type 2 (KECCAK256)
                         let preimage = (2, block_hash.clone(), block_bytes.to_vec());
                         let db_directory =
@@ -465,9 +530,11 @@ pub(crate) async fn handle_classic(
                         );
                         let pool = r2d2::Pool::new(manager).unwrap();
                         upload_image_to_sqlite_db(&pool, &preimage)?;
+                        tracing::info!("Preimage successfully uploaded to database.");
 
                         Ok(vec![])
                     } else {
+                        tracing::error!("Block not found");
                         Err(Box::<dyn Error>::from("Block not found"))
                     }
                 }
@@ -483,6 +550,7 @@ pub(crate) async fn handle_classic(
     callbacks.insert(PREIMAGE_HINT_GIO, Callback::Async(preimage_hint));
 
     // Only include LLAMA completion if NO_LLAMA is not set
+    tracing::warn!("Only include LLAMA completion if NO_LLAMA is not set");
     if std::env::var("NO_LLAMA").is_err() {
         callbacks.insert(LLAMA_COMPLETION_GIO, Callback::Async(completion));
     }
@@ -497,7 +565,9 @@ pub(crate) async fn handle_classic(
     );
 
     let machine_snapshot_path = Path::new(&classic_request.machine_snapshot_path);
+    tracing::debug!("Checking config.json at path: {:?}", machine_snapshot_path);
     if machine_snapshot_path.join("config.json").exists() {
+        tracing::info!("Found config.json, proceeding with run_advance");
         let reason = run_advance(
             classic_request.machine_snapshot_path.clone(),
             None,
@@ -521,6 +591,10 @@ pub(crate) async fn handle_classic(
             reason,
         ))
     } else {
+        tracing::error!(
+            "No config.json file was found in {:?}",
+            machine_snapshot_path
+        );
         return Err(Box::<dyn Error>::from(format!(
             "No config.json file was found in: {:?}",
             machine_snapshot_path
