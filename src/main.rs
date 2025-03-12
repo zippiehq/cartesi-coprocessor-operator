@@ -50,7 +50,7 @@ use std::time::Instant;
 use std::{convert::Infallible, net::SocketAddr};
 use std::{env, path::PathBuf};
 use tracing::{debug, error, info_span, instrument, trace, warn};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{fmt, EnvFilter};
 
 const HEIGHT: usize = 63;
 #[cfg(feature = "bls_signing")]
@@ -182,9 +182,10 @@ async fn main() {
     // const UPLOAD_COMPLETED: &str = "upload_completed";
     // const UPLOAD_FAILED: &str = "upload_failed";
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::TRACE)
+    let subscriber = fmt()
+        .with_env_filter(EnvFilter::from_default_env())
         .finish();
+
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     let main_span = info_span!("main_process", version = env!("CARGO_PKG_VERSION"));
