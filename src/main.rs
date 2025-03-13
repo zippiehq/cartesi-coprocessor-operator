@@ -222,7 +222,6 @@ async fn main() {
         .query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()))
         .expect("Failed to set WAL mode");
 
-    tracing::info!("create table for requests");
     // Create table for requests
     sqlite_connect
         .execute(
@@ -237,7 +236,6 @@ async fn main() {
         )
         .unwrap();
 
-    tracing::info!("Creating table for preimages");
     // Create table for preimages
     sqlite_connect
         .execute(
@@ -259,7 +257,6 @@ async fn main() {
         )
         .unwrap();
 
-    tracing::info!("create tablae for results");
     // Create table for results
     sqlite_connect
         .execute(
@@ -301,7 +298,7 @@ async fn main() {
 
                 let mut active_threads = number_of_active_threads.lock().unwrap();
                 while *active_threads >= max_threads_number {
-                    println!("Max thread limit reached. Waiting for the notification.");
+                    tracing::info!("Max thread limit reached. Waiting for the notification.");
                     active_threads = cvar.wait(active_threads).unwrap();
                 }
                 *active_threads += 1;
@@ -481,7 +478,6 @@ async fn main() {
                                 || finish_result.is_none()
                                 || reason.is_none()
                             {
-                                println!("this request hasn't been handled yet");
                                 tracing::warn!(
                                     "Request hasn't been handled yet, adding to database"
                                 );
@@ -547,7 +543,6 @@ async fn main() {
                             let mut keccak_outputs = Vec::new();
 
                             // Generating proofs for each output
-                            tracing::info!("Generating proofs for each output");
                             for output in outputs_vector.as_ref().unwrap() {
                                 let mut hasher = Keccak256::new();
                                 hasher.update(output.1.clone());
@@ -892,12 +887,9 @@ async fn main() {
                                 }
                             };
 
-                            tracing::info!("Checking snapshot directory environment variable");
                             let snapshot_dir = std::env::var("SNAPSHOT_DIR").unwrap();
-                            tracing::debug!("Snapshot directory: {}", snapshot_dir);
                             let machine_dir = format!("{}/{}", snapshot_dir, machine_hash);
                             let lock_file_path = format!("{}.lock", machine_dir);
-                            tracing::info!("Checking if machine directory exists: {}", machine_dir);
                             if Path::new(&machine_dir).exists() {
                                 if Path::new(&lock_file_path).exists() {
                                     let json_response = serde_json::json!({
@@ -968,7 +960,6 @@ async fn main() {
                                                     );
                                                     let _ =
                                                         std::fs::remove_file(&lock_file_path_clone);
-                                                    eprintln!("Invalid CID");
                                                     return;
                                                 }
                                             };
@@ -996,7 +987,6 @@ async fn main() {
                                                 );
                                                 let _ = std::fs::remove_dir_all(&machine_dir_clone);
                                                 let _ = std::fs::remove_file(&lock_file_path_clone);
-                                                eprintln!("Failed to download directory: {}", err);
                                                 return;
                                             }
 
@@ -1024,7 +1014,7 @@ async fn main() {
                                                         let _ = std::fs::remove_file(
                                                             &lock_file_path_clone,
                                                         );
-                                                        eprintln!(
+                                                        tracing::error!(
                                                             "Failed to read hash file: {}",
                                                             err
                                                         );
@@ -1050,9 +1040,6 @@ async fn main() {
                                                         let _ = std::fs::remove_file(
                                                             &lock_file_path_clone,
                                                         );
-                                                        eprintln!(
-                                                        "Invalid machine_hash: must be valid hex"
-                                                    );
                                                         return;
                                                     }
                                                 };
@@ -1061,13 +1048,11 @@ async fn main() {
                                                 tracing::error!("Hash mismatch: expected does not match provided machine_hash.");
                                                 let _ = std::fs::remove_dir_all(&machine_dir_clone);
                                                 let _ = std::fs::remove_file(&lock_file_path_clone);
-                                                eprintln!("Expected hash from /hash file does not match machine_hash");
                                                 return;
                                             }
 
                                             tracing::info!("Download completed successfully, removing lock file.");
                                             let _ = std::fs::remove_file(&lock_file_path_clone);
-                                            println!("Download completed successfully");
                                         });
 
                                         let json_response = serde_json::json!({
@@ -1305,11 +1290,6 @@ async fn main() {
                                                 upload_dir.display(),
                                                 e
                                             );
-                                            eprintln!(
-                                                "Failed to create directory {}: {}",
-                                                upload_dir.display(),
-                                                e
-                                            );
                                             {
                                                 let mut map =
                                                     upload_status_map_clone.lock().unwrap();
@@ -1335,7 +1315,6 @@ async fn main() {
                                                     "Failed to parse presigned URL: {}",
                                                     e
                                                 );
-                                                eprintln!("Failed to parse presigned URL: {}", e);
                                                 {
                                                     let mut map =
                                                         upload_status_map_clone.lock().unwrap();
@@ -1359,7 +1338,6 @@ async fn main() {
                                                     "Failed to send the GET request: {}",
                                                     e
                                                 );
-                                                eprintln!("Failed to send GET request: {}", e);
                                                 {
                                                     let mut map =
                                                         upload_status_map_clone.lock().unwrap();
@@ -1384,11 +1362,6 @@ async fn main() {
                                                 "Download failed with status: {}",
                                                 response.status()
                                             );
-                                            let error_msg = format!(
-                                                "Download failed with status: {}",
-                                                response.status()
-                                            );
-                                            eprintln!("{}", error_msg);
                                             {
                                                 let mut map =
                                                     upload_status_map_clone.lock().unwrap();
@@ -1410,11 +1383,6 @@ async fn main() {
                                                 Ok(f) => f,
                                                 Err(e) => {
                                                     tracing::error!("Failed to create file");
-                                                    eprintln!(
-                                                        "Failed to create file {}: {}",
-                                                        file_path.display(),
-                                                        e
-                                                    );
                                                     {
                                                         let mut map =
                                                             upload_status_map_clone.lock().unwrap();
@@ -1445,11 +1413,6 @@ async fn main() {
                                             );
                                             if let Err(e) = file.write_all(&chunk).await {
                                                 tracing::error!("Failed to write file: {}", e);
-                                                eprintln!(
-                                                    "Failed to write to file {}: {}",
-                                                    file_path.display(),
-                                                    e
-                                                );
                                                 {
                                                     let mut map =
                                                         upload_status_map_clone.lock().unwrap();
@@ -1485,11 +1448,6 @@ async fn main() {
                                                 }
                                                 Err(e) => {
                                                     tracing::error!(
-                                                        "Failed to get metadata{}: {}",
-                                                        file_path.display(),
-                                                        e
-                                                    );
-                                                    eprintln!(
                                                         "Failed to get metadata for {}: {}",
                                                         file_path.display(),
                                                         e
@@ -1549,10 +1507,6 @@ async fn main() {
                                                 tracing::info!(
                                                     "DAG import completed successfully "
                                                 );
-                                                println!(
-                                                    "DAG import completed successfully for upload_id: {}",
-                                                    upload_id_clone
-                                                );
                                             }
                                             Err(e) => {
                                                 tracing::error!("DAG import failed : {}", e);
@@ -1561,10 +1515,6 @@ async fn main() {
                                                 map.insert(
                                                     upload_id_clone.clone(),
                                                     UploadState::DagImportError(e.to_string()),
-                                                );
-                                                eprintln!(
-                                                    "DAG import failed for upload_id: {}: {}",
-                                                    upload_id_clone, e
                                                 );
                                             }
                                         }
@@ -1575,10 +1525,6 @@ async fn main() {
                                         .await;
 
                                         tracing::info!(
-                                            "Download and DAG import completed successfully for upload_id: {} (Size: {} bytes)",
-                                            upload_id_clone, file_size
-                                        );
-                                        println!(
                                             "Download and DAG import completed successfully for upload_id: {} (Size: {} bytes)",
                                             upload_id_clone, file_size
                                         );
@@ -1721,7 +1667,6 @@ async fn main() {
     });
 
     let server = Server::bind(&addr).serve(Box::new(service));
-    println!("Server is listening on {}", addr);
     tracing::info!("Server started on {}", addr);
     server.await.unwrap();
 }
@@ -1742,7 +1687,7 @@ fn check_preimage_hash(
         hasher.update(data);
         let result = hasher.finalize();
         if &result.to_vec() == hash {
-            tracing::info!("sha256of the data and the hash successful match");
+            tracing::info!("sha256 of the data and the hash successfully match");
             return Ok(());
         } else {
             tracing::error!("sha256 of the data and the hash don't match");
@@ -1757,7 +1702,7 @@ fn check_preimage_hash(
         hasher.update(data);
         let result = hasher.finalize();
         if &result.to_vec() == hash {
-            tracing::info!("keccak256 of the data and the hash successful match");
+            tracing::info!("keccak256 of the data and the hash successfully match");
             return Ok(());
         } else {
             tracing::error!("keccak256 of the data and the hash don't match");
@@ -1904,7 +1849,6 @@ struct AttestationUserData {
     user_data: String,
 }
 fn check_hash_format(hash: &str, error_message: &str) -> Result<(), Response<Body>> {
-    tracing::info!("Checking hash format for input: {}", hash);
     let hash_regex = Regex::new(r"^[a-f0-9-]+$").unwrap();
 
     if !hash_regex.is_match(hash) {
@@ -1979,7 +1923,6 @@ async fn dedup_download_directory(
     out_file_path: String,
     max_download: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tracing::info!("Initializing IPFS client for URL: {}", ipfs_url);
     let ipfs_client =
         <ipfs_api_backend_hyper::IpfsClient as ipfs_api_backend_hyper::TryFromUri>::from_str(
             ipfs_url,

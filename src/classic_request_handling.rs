@@ -114,7 +114,6 @@ pub(crate) fn query_result_from_database(
     finish_result: &mut Option<(u16, Vec<u8>)>,
     reason: &mut Option<advance_runner::YieldManualReason>,
 ) -> Result<(), Box<dyn Error>> {
-    tracing::info!(id = ?id, "Starting database query");
     // Query the result from the DB
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
@@ -182,7 +181,6 @@ pub(crate) fn query_request_with_the_highest_priority(
             };
         } else {
             tracing::info!("Waiting for new data to comme in");
-            println!("Waiting for new data to come in");
             let (lock, cvar) = &*new_record;
             let mut record = lock.lock().unwrap();
             while !*record {
@@ -200,10 +198,6 @@ pub(crate) async fn handle_database_request(
     classic_request: &ClassicRequest,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
 ) {
-    tracing::info!(
-        request_id = classic_request.id,
-        "Starting database request handling"
-    );
     match handle_classic(classic_request).await {
         Ok(response) => {
             let reason = match response.1 {
@@ -385,7 +379,6 @@ pub(crate) async fn handle_classic(
                 ));
             }
             tracing::debug!("completition input {:?}", input.clone());
-            println!("completition input {:?}", input.clone());
             let llama_server_address = var("LLAMA_SERVER")?;
             let completion_http_request = Request::builder()
                 .method("POST")
@@ -550,7 +543,6 @@ pub(crate) async fn handle_classic(
     callbacks.insert(PREIMAGE_HINT_GIO, Callback::Async(preimage_hint));
 
     // Only include LLAMA completion if NO_LLAMA is not set
-    tracing::warn!("Only include LLAMA completion if NO_LLAMA is not set");
     if std::env::var("NO_LLAMA").is_err() {
         callbacks.insert(LLAMA_COMPLETION_GIO, Callback::Async(completion));
     }
@@ -565,7 +557,6 @@ pub(crate) async fn handle_classic(
     );
 
     let machine_snapshot_path = Path::new(&classic_request.machine_snapshot_path);
-    tracing::debug!("Checking config.json at path: {:?}", machine_snapshot_path);
     if machine_snapshot_path.join("config.json").exists() {
         tracing::info!("Found config.json, proceeding with run_advance");
         let reason = run_advance(
