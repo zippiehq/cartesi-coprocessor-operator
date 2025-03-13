@@ -1362,6 +1362,10 @@ async fn main() {
                                                 "Download failed with status: {}",
                                                 response.status()
                                             );
+                                            let error_msg = format!(
+                                                "Download failed with status: {}",
+                                                response.status()
+                                            );
                                             {
                                                 let mut map =
                                                     upload_status_map_clone.lock().unwrap();
