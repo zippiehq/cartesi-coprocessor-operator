@@ -174,6 +174,7 @@ async fn log_and_return(
 
     Ok(response)
 }
+
 #[async_std::main]
 
 async fn main() {
@@ -359,6 +360,22 @@ async fn main() {
                     tracing::debug!("Parsed path segments: {:?}", segments);
 
                     let response = match (req.method().clone(), &segments as &[&str]) {
+                        (hyper::Method::GET, ["version"]) => {
+                            tracing::info!("Received request for API version");
+
+                            let json_response = serde_json::json!({
+                                "version": 0
+                            });
+
+                            let response = Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .body(Body::from(json_response.to_string()))
+                                .unwrap();
+
+                            return Ok::<_, Infallible>(response);
+                        }
+
                         (hyper::Method::POST, ["classic", machine_hash]) => {
                             tracing::info!(
                                 "Handling POST request for classic with machine_hash: {}",
