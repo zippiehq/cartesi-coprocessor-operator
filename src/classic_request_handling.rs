@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::ptr::fn_addr_eq;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
 use std::{env::var, error::Error, vec};
@@ -40,12 +41,12 @@ const HINT_ETH_BLOCK_PREIMAGE: u16 = 2;
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     requests: Arc<Mutex<HashMap<i64, Sender<i64>>>>,
-    sender: Sender<i64>,
+    sender: Option<Sender<i64>>,
     machine_snapshot_path: &Path,
     payload: &Vec<u8>,
     no_console_putchar: &bool,
     priority: &i64,
-) {
+) -> i64 {
     tracing::info!("Starting to add request to database");
     let no_console_putchar: i64 = match no_console_putchar {
         true => 1,
@@ -56,10 +57,12 @@ pub(crate) fn add_request_to_database(
         machine_snapshot_path, payload.len(), no_console_putchar, priority
     );
     // Write down new request to the DB
-    let id: i64  = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)
-).unwrap();
+    let id: i64  = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)).unwrap();
     let mut requests = requests.lock().unwrap();
-    requests.insert(id, sender);
+    if let Some(sender_channel) = sender {
+        requests.insert(id, sender_channel);
+    }
+    id
 }
 pub(crate) fn check_previously_handled_results(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
@@ -67,17 +70,13 @@ pub(crate) fn check_previously_handled_results(
     payload: &Vec<u8>,
     no_console_putchar: &bool,
     priority: &i64,
-    outputs_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
-    reports_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
-    finish_result: &mut Option<(u16, Vec<u8>)>,
-    reason: &mut Option<advance_runner::YieldManualReason>,
-) {
+) -> Option<i64> {
     tracing::info!("Checking previously handled results for machine_snapshot_path={:?}, payload_length={}, no_console_putchar={}, priority={}",
         machine_snapshot_path, payload.len(), no_console_putchar, priority
     );
     let mut statement = sqlite_connection
     .prepare(
-        "SELECT * FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ?;",
+        "SELECT id FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ?;",
     )
     .unwrap();
 
@@ -90,30 +89,23 @@ pub(crate) fn check_previously_handled_results(
         ])
         .unwrap();
     if let Some(statement) = rows.next().unwrap() {
-        if statement.get::<_, String>(9).is_err() {
-            tracing::info!("this request has been already handled");
-            println!("this request has been already handled");
-            *outputs_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
-            *reports_vector = bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
-            *finish_result = bincode::deserialize(&statement.get::<_, Vec<u8>>(3).unwrap()).ok();
-            *reason = match &statement.get::<_, i64>(4).unwrap() {
-                1 => Some(YieldManualReason::Accepted),
-                2 => Some(YieldManualReason::Rejected),
-                4 => Some(YieldManualReason::Exception),
-                _ => None,
-            }
-        }
+        return Some(statement.get(0).unwrap());
     }
+    return None;
 }
 
 pub(crate) fn query_result_from_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     id: &i64,
-    outputs_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
-    reports_vector: &mut Option<Vec<(u16, Vec<u8>)>>,
-    finish_result: &mut Option<(u16, Vec<u8>)>,
-    reason: &mut Option<advance_runner::YieldManualReason>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<
+    (
+        Option<Vec<(u16, Vec<u8>)>>,
+        Option<Vec<(u16, Vec<u8>)>>,
+        Option<(u16, Vec<u8>)>,
+        Option<advance_runner::YieldManualReason>,
+    ),
+    Box<dyn Error>,
+> {
     // Query the result from the DB
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
@@ -124,19 +116,19 @@ pub(crate) fn query_result_from_database(
     if let Some(statement) = rows.next().unwrap() {
         match statement.get::<_, String>(9) {
             Err(_) => {
-                *outputs_vector =
+                let outputs_vector =
                     bincode::deserialize(&statement.get::<_, Vec<u8>>(1).unwrap()).ok();
-                *reports_vector =
+                let reports_vector =
                     bincode::deserialize(&statement.get::<_, Vec<u8>>(2).unwrap()).ok();
-                *finish_result =
+                let finish_result =
                     bincode::deserialize(&statement.get::<_, Vec<u8>>(3).unwrap()).ok();
-                *reason = match &statement.get::<_, i64>(4).unwrap() {
+                let reason = match &statement.get::<_, i64>(4).unwrap() {
                     1 => Some(YieldManualReason::Accepted),
                     2 => Some(YieldManualReason::Rejected),
                     4 => Some(YieldManualReason::Exception),
                     _ => None,
                 };
-                return Ok(());
+                return Ok((outputs_vector, reports_vector, finish_result, reason));
             }
             Ok(error_message) => {
                 tracing::error!(id = ?id, error = ?error_message, "Database query error occurred");
@@ -145,7 +137,7 @@ pub(crate) fn query_result_from_database(
         }
     }
     tracing::info!(id = ?id, "No results found in database");
-    return Ok(());
+    return Ok((None, None, None, None));
 }
 
 #[instrument(skip(sqlite_connection, new_record), fields(waiting_for_data = false))]
