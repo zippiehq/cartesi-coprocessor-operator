@@ -1,107 +1,276 @@
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
-use alloy_signer_local::PrivateKeySigner;
-use clap::Parser;
-use eigen_client_avsregistry::writer::AvsRegistryChainWriter;
-use eigen_client_elcontracts::{
-    reader::ELChainReader,
-    writer::{ELChainWriter, Operator},
-};
-use eigen_crypto_bls::BlsKeyPair;
-use eigen_logging::get_test_logger;
-use eigen_testing_utils::transaction::wait_transaction;
-//use eigen_utils::erc20::ERC20;
-use eigen_common::get_signer;
-use eigen_utils::slashing::{
-    core::strategymanager::StrategyManager,
-    middleware::ierc20::IERC20::{self, IERC20Instance},
-};
-use setup_operator::Options;
 use std::{
     fs::File,
     path::Path,
-    process::exit,
     str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
 };
+
+use anyhow::{Result, anyhow};
+use clap::Parser;
+
+use eigen_client_avsregistry::writer::AvsRegistryChainWriter;
+use eigen_client_elcontracts::{
+    reader::ELChainReader,
+    writer::ELChainWriter,
+};
+use eigen_common::get_signer;
+use eigen_utils::slashing::{
+    core::allocationmanager::AllocationManager,
+    middleware::{
+        servicemanagerbase::ServiceManagerBase,
+        registrycoordinator::ISlashingRegistryCoordinatorTypes,
+        stakeregistry::IStakeRegistryTypes,
+    },
+};
+use eigen_crypto_bls::BlsKeyPair;
+use eigen_logging::{init_logger, get_logger, log_level::LogLevel};
+
+use alloy_primitives::{Address, FixedBytes, aliases::U96};
+use alloy_sol_types::SolCall;
+use alloy_signer_local::PrivateKeySigner;
 
 #[tokio::main]
 async fn main() {
+    init_logger(LogLevel::Error);
+    let log = get_logger();
+
     let opts = Options::parse();
+
+    if let Err(err) = set_appointee(&opts).await {
+        log.fatal("failed to set appointee: {}", &err.to_string());
+    }
+
+    if let Err(err) = create_total_delegated_stake_quorum(&opts).await {
+        log.fatal("failed to create total delegated stake quorum: {}", &err.to_string());
+    }
+
+    if let Err(err) = register_for_operator_sets(&opts).await {
+        log.fatal("failed to register for operator sets: {}", &err.to_string());
+    }
+}
+
+#[derive(Parser, Clone, Debug)]
+pub struct Options {
+    #[clap(long, env = "EL_DEPLOYMENT_FILE_PATH")]
+    pub el_deployment_file_path: String,
+
+    #[clap(long, env = "AVS_DEPLOYMENT_FILE_PATH")]
+    pub avs_deployment_file_path: String,
+
+    #[clap(long, env = "OPERATOR_PRIVATE_KEY")]
+    pub operator_private_key: String,
+
+    #[clap(long, env = "OPERATOR_BLS_KEY")]
+    pub operator_bls_key: String,
+
+    #[clap(long, env = "OPERATOR_SOCKET")]
+    pub operator_socket: String,
+
+    #[clap(long, env = "EL_NODE_URL")]
+    pub el_node_url: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EigenlayerDeployment {
+    pub allocation_manager: Address,
+    pub avs_directory: Address,
+    pub delegation_manager: Address,
+    pub eigen_pod_beacon: Address,
+    pub eigen_pod_manager: Address,
+    pub pauser_registry: Address,
+    pub permission_controller: Address,
+    pub proxy_admin: Address,
+    pub rewards_coordinator: Address,
+    pub strategy_beacon: Address,
+    pub strategy_factory: Address,
+    pub strategy_manager: Address,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvsDeployment {
+    pub L1_sender: Address,
+    pub L2_coprocessor: Address,
+    pub L2_coprocessor_caller: Address,
+    pub bls_apk_registry: Address,
+    pub coprocessor: Address,
+    pub coprocessor_service_manager: Address,
+    pub coprocessor_to_L2: Address,
+    pub index_registry: Address,
+    pub operator_state_retriever: Address,
+    pub pauser_registry: Address,
+    pub proxy_admin: Address,
+    pub registry_coordinator: Address,
+    pub socket_registry: Address,
+    pub stake_registry: Address,
+    pub strategy: Address,
+    pub strategy_token: Address,
+    pub instant_slasher: Address,
+}
+
+impl Options {
+    pub fn el_deployment(&self) -> Result<EigenlayerDeployment> {
+        let deployment_file = File::open(Path::new(&self.el_deployment_file_path))?;
+        let deployment: EigenlayerDeployment = serde_json::from_reader(deployment_file)?;
+        Ok(deployment)
+    }
+
+    pub fn avs_deployment(&self) -> Result<AvsDeployment> {
+        let deployment_file = File::open(Path::new(&self.avs_deployment_file_path))?;
+        let deployment: AvsDeployment = serde_json::from_reader(deployment_file)?;
+        Ok(deployment)
+    }
+
+    pub fn operator_address(&self) -> Result<Address> {
+        let signer = PrivateKeySigner::from_str(&self.operator_private_key)?;
+        Ok(signer.address())
+    }
+
+    pub fn operator_bls_key_pair(&self) -> Result<BlsKeyPair> {
+        let key_pair = BlsKeyPair::new(self.operator_bls_key.to_string())?;
+        Ok(key_pair)
+    }
+}
+
+async fn set_appointee(opts: &Options) -> Result<()> {
+    let log = get_logger();
     
-    let el_deployment = match opts.el_deployment() {
-        Ok(deployment) => deployment,
-        Err(err) => {
-            eprintln!("invalid eigenlayer deployment: {}", err);
-            exit(1)
-        }
-    };
-
-    let avs_deployment = match opts.avs_deployment() {
-        Ok(deployment) => deployment,
-        Err(err) => {
-            eprintln!("invalid avs deployment: {}", err);
-            exit(1)
-        }
-    };
-
-    let signer = match opts.signer() {
-        Ok(signer) => signer,
-        Err(err) => {
-            eprintln!("invalid operator private key: {}", err);
-            exit(1)
-        }
-    };
-
-    let bls_key_pair = match opts.bls_key_pair() {
-        Ok(key_pair) => key_pair,
-        Err(err) => {
-            eprintln!("invalid operator bls key: {}", err);
-            exit(1)
-        }
-    };
-
-    // !!!
-    /*
-    let signer = PrivateKeySigner::from_str(&opt.operator_private_key).unwrap();
-
-    let deployment_parameters_devnet =
-        File::open(Path::new(&opt.chain_writer_reader_addresses)).unwrap();
-
-    let json: serde_json::Value = serde_json::from_reader(deployment_parameters_devnet).unwrap();
-
-    let delegation_manager_address = 
-        Address::parse_checksummed(json.get("delegationManager").unwrap().as_str().unwrap(), None)
-            .unwrap();
-
-    let avs_directory_address =
-        Address::parse_checksummed(json.get("avsDirectory").unwrap().as_str().unwrap(), None)
-            .unwrap();
-
-    let allocation_manager_address =
-        Address::parse_checksummed(json.get("allocationManager").unwrap().as_str().unwrap(), None)
-            .unwrap();
+    let el_deployment  = opts.el_deployment()?;
+    let avs_deployment = opts.avs_deployment()?;
+    let operator_address = opts.operator_address()?;
+    let signer = get_signer(&opts.operator_private_key, &opts.el_node_url);
     
-    let strategy_manager_address =
-        Address::parse_checksummed(json.get("strategyManager").unwrap().as_str().unwrap(), None)
-            .unwrap();
+    // ServiceManager.setAppointee for AllocationManager.setAvsRegistrar
+    let service_manager = ServiceManagerBase::new(
+        avs_deployment.coprocessor_service_manager,
+        signer.clone()
+    );
+    let receipt = service_manager
+        .setAppointee(
+            operator_address,
+            el_deployment.allocation_manager,
+            FixedBytes(AllocationManager::setAVSRegistrarCall::SELECTOR),
+        )
+        .send()
+        .await
+        .map_err(|err| anyhow!("failed to send setAvsRegistrar appointee tx: {}", err))?
+        .get_receipt()
+        .await
+        .map_err(|err| anyhow!("failed to get recepit for setAvsRegistrar appointee tx: {}", err))?;
+    
+    log.info(
+        "tx {} successfully included for setAppointee for selector setAvsRegistrar",
+        &receipt.transaction_hash.to_string(),
+    );
 
-    let rewards_coordinator_address =
-        Address::parse_checksummed(json.get("rewardsCoordinator").unwrap().as_str().unwrap(), None)
-            .unwrap();
+    //  AllocationManager.setAvsRegistrar
+    let allocation_manager = AllocationManager::new(
+        el_deployment.allocation_manager,
+        signer.clone()
+    );
+    let receipt = allocation_manager
+        .setAVSRegistrar(
+            avs_deployment.coprocessor_service_manager,
+            avs_deployment.registry_coordinator,
+        )
+        .send()
+        .await
+        .map_err(|err| anyhow!("failed to send setAvsRegistrar tx: {}", err.to_string()))?
+        .get_receipt()
+        .await
+        .map_err(|err| anyhow!("failed to get receipt for setAvsRegistar tx: {}", err.to_string()))?;
 
-    let permission_controller_address =
-        Address::parse_checksummed(json.get("permissionController").unwrap().as_str().unwrap(), None)
-            .unwrap();
-    */
+    log.info(
+        "tx {} successfully included for setAvsRegistrar tx",
+        &receipt.transaction_hash.to_string(),
+    );
 
+    // ServiceManager.setAppointee for AllocaitonManager.createOperatorSetsCall
+    let receipt = service_manager
+        .setAppointee(
+            avs_deployment.registry_coordinator,
+            el_deployment.allocation_manager,
+            FixedBytes(AllocationManager::createOperatorSetsCall::SELECTOR),
+        )
+        .send()
+        .await
+        .map_err(|err| anyhow!("failed to send createOperatorSets appointee tx: {}", err.to_string()))?
+        .get_receipt()
+        .await
+        .map_err(|err| anyhow!("failed to get receipt for createOperatorSets appointee tx: {}", err.to_string()))?;
+
+    log.info(
+        "tx {} successfully included for setAppointee for selector createOperatorSetsCall tx",
+        &receipt.transaction_hash.to_string(),
+    );
+
+    // ServiceManager.setAppointee for AllocaitonManager.slashOperatorCall
+    let receipt = service_manager
+        .setAppointee(
+            avs_deployment.instant_slasher,
+            el_deployment.allocation_manager,
+            FixedBytes(AllocationManager::slashOperatorCall::SELECTOR),
+        )
+        .send()
+        .await
+        .map_err(|err| anyhow!("failed to send slashOperator appointee tx: {}", err.to_string()))?
+        .get_receipt()
+        .await
+        .map_err(|err| anyhow!("failed to get receipt for slashOperator appointee tx: {}", err.to_string()))?;
+
+    log.info(
+        "tx {} successfully included for setAppointee for selector slashOperatorCall tx",
+        &receipt.transaction_hash.to_string(),
+    );
+        
+    Ok(())
+}
+
+async fn create_total_delegated_stake_quorum(opts: &Options) -> Result<()> {
+    let avs_deployment = opts.avs_deployment()?;
+    
+    let operator_set_params = ISlashingRegistryCoordinatorTypes::OperatorSetParam{
+        maxOperatorCount: 3,
+        kickBIPsOfOperatorStake: 100,
+        kickBIPsOfTotalStake: 1000,
+    };
+    let strategy_params = IStakeRegistryTypes::StrategyParams{
+        strategy: avs_deployment.strategy,
+        multiplier: U96::from(1),
+    };
+
+    let avs_writer = AvsRegistryChainWriter::build_avs_registry_chain_writer(
+        get_logger(),
+        opts.el_node_url.clone(),
+        opts.operator_private_key.clone(),
+        avs_deployment.registry_coordinator,
+        avs_deployment.operator_state_retriever,
+    ).await?;
+    let tx_hash = avs_writer.create_total_delegated_stake_quorum(
+        operator_set_params,
+        U96::from(0),
+        vec![strategy_params],
+    ).await?;
+
+    get_logger().info("tx {} createTotalDelegatedStakeQuorum successfully included", &tx_hash.to_string());
+
+    Ok(())
+}
+
+async fn register_for_operator_sets(opts: &Options) -> Result<()> {
+    let el_deployment  = opts.el_deployment()?;
+    let avs_deployment = opts.avs_deployment()?;
+    let operator_address = opts.operator_address()?;
+    let operator_bls_key_pair = opts.operator_bls_key_pair()?;
+    
     let el_reader = ELChainReader::new(
-        get_test_logger(),
+        get_logger(),
         Some(el_deployment.allocation_manager),
         el_deployment.delegation_manager,
         el_deployment.rewards_coordinator,
         el_deployment.avs_directory,
         Some(el_deployment.permission_controller),
-        opts.el_node_url.to_owned(),
+        opts.el_node_url.clone(),
     );
 
     let el_writer = ELChainWriter::new(
@@ -111,92 +280,19 @@ async fn main() {
         Some(el_deployment.allocation_manager),
         avs_deployment.registry_coordinator,
         el_reader.clone(),
-        opts.el_node_url.to_string(),
-        opts.operator_private_key.to_string(),
+        opts.el_node_url.clone(),
+        opts.operator_private_key.clone(),
     );
 
-    let operator_details = Operator {
-        address: signer.address(),
-        delegation_approver_address: signer.address(),
-        metadata_url: "eigensdk-rs".to_string(),
-        allocation_delay: None,
-        _deprecated_earnings_receiver_address: Some(signer.address()),
-        staker_opt_out_window_blocks: Some(3),
-    };
+    let tx_hash = el_writer.register_for_operator_sets(
+        operator_address, 
+        avs_deployment.coprocessor_service_manager,
+        vec![0],
+        operator_bls_key_pair,
+        &opts.operator_socket,
+    ).await?;
 
-    // !!!
-    /* let _ = el_chain_writer
-        .register_as_operator(operator_details)
-        .await
-        .unwrap();
-    */
-
-    // !!!
-    /* 
-    let provider = get_signer(
-        &opt.operator_private_key.to_string(),
-        &opt.el_node_url.to_string(),
-    );
-
-    let coprocessor_deployment_output_devnet =
-        File::open(Path::new(&opt.avs_registry_writer_addresses)).unwrap();
-
-    let json: serde_json::Value =
-        serde_json::from_reader(coprocessor_deployment_output_devnet).unwrap();
-
-    let registry_coordinator = Address::parse_checksummed(
-        json.get("addresses")
-            .unwrap()
-            .get("registryCoordinator")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        None,
-    )
-    .unwrap();
-
-    let operator_state_retriever = Address::parse_checksummed(
-        json.get("addresses")
-            .unwrap()
-            .get("operatorStateRetriever")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        None,
-    )
-    .unwrap();
-    */
-
-    let avs_writer = AvsRegistryChainWriter::build_avs_registry_chain_writer(
-        get_test_logger(),
-        opts.el_node_url.to_string(),
-        opts.operator_private_key,
-        avs_deployment.registry_coordinator,
-        avs_deployment.operator_state_retriever,
-    ).await.unwrap();
-
-    // !!!
-    /*
-    let bls_key_pair = BlsKeyPair::new(opt.operator_bls_key.to_string()).unwrap();
-    let salt: FixedBytes<32> = FixedBytes::from([0x03; 32]);
-    let now = SystemTime::now();
-    let seconds_since_epoch = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let expiry = U256::from(seconds_since_epoch) + U256::from(10000);
-    let quorum_numbers = Bytes::from_str("0x00").unwrap();
+    get_logger().info("tx {} registerForOperatorSets successfully included", &tx_hash.to_string());
     
-    let tx_hash = avs_writer
-        .register_operator_in_quorum_with_avs_registry_coordinator(
-            bls_key_pair,
-            salt,
-            expiry,
-            quorum_numbers,
-            opts.operator_socket,
-        )
-        .await
-        .unwrap();
-    wait_transaction(&opts.el_node_url, tx_hash).await.unwrap();
-    println!("setup_operator finished");
-    */
+    Ok(())
 }
-
-
