@@ -36,15 +36,15 @@ async fn main() {
     let opts = Options::parse();
 
     if let Err(err) = set_appointee(&opts).await {
-        log.fatal("failed to set appointee: {}", &err.to_string());
+        log.fatal("failed to set appointee", &err.to_string());
     }
 
     if let Err(err) = create_total_delegated_stake_quorum(&opts).await {
-        log.fatal("failed to create total delegated stake quorum: {}", &err.to_string());
+        log.fatal("failed to create total delegated stake quorum", &err.to_string());
     }
 
     if let Err(err) = register_for_operator_sets(&opts).await {
-        log.fatal("failed to register for operator sets: {}", &err.to_string());
+        log.fatal("failed to register for operator sets", &err.to_string());
     }
 }
 
@@ -171,7 +171,7 @@ async fn set_appointee(opts: &Options) -> Result<()> {
         .map_err(|err| anyhow!("failed to get recepit for setAvsRegistrar appointee tx: {}", err))?;
     
     log.info(
-        "tx {} successfully included for setAppointee for selector setAvsRegistrar",
+        "tx successfully included for setAppointee for selector setAvsRegistrar",
         &receipt.transaction_hash.to_string(),
     );
 
@@ -193,7 +193,7 @@ async fn set_appointee(opts: &Options) -> Result<()> {
         .map_err(|err| anyhow!("failed to get receipt for setAvsRegistar tx: {}", err.to_string()))?;
 
     log.info(
-        "tx {} successfully included for setAvsRegistrar tx",
+        "tx successfully included for setAvsRegistrar tx",
         &receipt.transaction_hash.to_string(),
     );
 
@@ -212,7 +212,7 @@ async fn set_appointee(opts: &Options) -> Result<()> {
         .map_err(|err| anyhow!("failed to get receipt for createOperatorSets appointee tx: {}", err.to_string()))?;
 
     log.info(
-        "tx {} successfully included for setAppointee for selector createOperatorSetsCall tx",
+        "tx successfully included for setAppointee for selector createOperatorSetsCall tx",
         &receipt.transaction_hash.to_string(),
     );
 
@@ -231,7 +231,7 @@ async fn set_appointee(opts: &Options) -> Result<()> {
         .map_err(|err| anyhow!("failed to get receipt for slashOperator appointee tx: {}", err.to_string()))?;
 
     log.info(
-        "tx {} successfully included for setAppointee for selector slashOperatorCall tx",
+        "tx successfully included for setAppointee for selector slashOperatorCall tx",
         &receipt.transaction_hash.to_string(),
     );
         
@@ -264,7 +264,7 @@ async fn create_total_delegated_stake_quorum(opts: &Options) -> Result<()> {
         vec![strategy_params],
     ).await?;
 
-    get_logger().info("tx {} createTotalDelegatedStakeQuorum successfully included", &tx_hash.to_string());
+    get_logger().info("tx createTotalDelegatedStakeQuorum successfully included", &tx_hash.to_string());
 
     Ok(())
 }
@@ -304,7 +304,7 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
         &opts.operator_socket,
     ).await?;
 
-    get_logger().info("tx {} registerForOperatorSets successfully included", &tx_hash.to_string());
+    get_logger().info("tx registerForOperatorSets successfully included", &tx_hash.to_string());
     
     Ok(())
 }
