@@ -72,6 +72,12 @@ pub struct Options {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EigenlayerDeployment {
+    pub addresses: EigenlayerDeploymentAddresses
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EigenlayerDeploymentAddresses {
     pub allocation_manager: Address,
     pub avs_directory: Address,
     pub delegation_manager: Address,
@@ -89,13 +95,19 @@ pub struct EigenlayerDeployment {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvsDeployment {
-    pub L1_sender: Address,
-    pub L2_coprocessor: Address,
-    pub L2_coprocessor_caller: Address,
+    pub addresses: AvsDeploymentAddresses
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvsDeploymentAddresses {
+    pub l1_sender: Address,
+    pub l2_coprocessor: Address,
+    pub l2_coprocessor_caller: Address,
     pub bls_apk_registry: Address,
     pub coprocessor: Address,
     pub coprocessor_service_manager: Address,
-    pub coprocessor_to_L2: Address,
+    pub coprocessor_to_l2: Address,
     pub index_registry: Address,
     pub operator_state_retriever: Address,
     pub pauser_registry: Address,
@@ -105,7 +117,7 @@ pub struct AvsDeployment {
     pub stake_registry: Address,
     pub strategy: Address,
     pub strategy_token: Address,
-    pub instant_slasher: Address,
+    pub slasher: Address,
 }
 
 impl Options {
@@ -142,13 +154,13 @@ async fn set_appointee(opts: &Options) -> Result<()> {
     
     // ServiceManager.setAppointee for AllocationManager.setAvsRegistrar
     let service_manager = ServiceManagerBase::new(
-        avs_deployment.coprocessor_service_manager,
+        avs_deployment.addresses.coprocessor_service_manager,
         signer.clone()
     );
     let receipt = service_manager
         .setAppointee(
             operator_address,
-            el_deployment.allocation_manager,
+            el_deployment.addresses.allocation_manager,
             FixedBytes(AllocationManager::setAVSRegistrarCall::SELECTOR),
         )
         .send()
@@ -165,13 +177,13 @@ async fn set_appointee(opts: &Options) -> Result<()> {
 
     //  AllocationManager.setAvsRegistrar
     let allocation_manager = AllocationManager::new(
-        el_deployment.allocation_manager,
+        el_deployment.addresses.allocation_manager,
         signer.clone()
     );
     let receipt = allocation_manager
         .setAVSRegistrar(
-            avs_deployment.coprocessor_service_manager,
-            avs_deployment.registry_coordinator,
+            avs_deployment.addresses.coprocessor_service_manager,
+            avs_deployment.addresses.registry_coordinator,
         )
         .send()
         .await
@@ -188,8 +200,8 @@ async fn set_appointee(opts: &Options) -> Result<()> {
     // ServiceManager.setAppointee for AllocaitonManager.createOperatorSetsCall
     let receipt = service_manager
         .setAppointee(
-            avs_deployment.registry_coordinator,
-            el_deployment.allocation_manager,
+            avs_deployment.addresses.registry_coordinator,
+            el_deployment.addresses.allocation_manager,
             FixedBytes(AllocationManager::createOperatorSetsCall::SELECTOR),
         )
         .send()
@@ -207,8 +219,8 @@ async fn set_appointee(opts: &Options) -> Result<()> {
     // ServiceManager.setAppointee for AllocaitonManager.slashOperatorCall
     let receipt = service_manager
         .setAppointee(
-            avs_deployment.instant_slasher,
-            el_deployment.allocation_manager,
+            avs_deployment.addresses.slasher,
+            el_deployment.addresses.allocation_manager,
             FixedBytes(AllocationManager::slashOperatorCall::SELECTOR),
         )
         .send()
@@ -235,7 +247,7 @@ async fn create_total_delegated_stake_quorum(opts: &Options) -> Result<()> {
         kickBIPsOfTotalStake: 1000,
     };
     let strategy_params = IStakeRegistryTypes::StrategyParams{
-        strategy: avs_deployment.strategy,
+        strategy: avs_deployment.addresses.strategy,
         multiplier: U96::from(1),
     };
 
@@ -243,8 +255,8 @@ async fn create_total_delegated_stake_quorum(opts: &Options) -> Result<()> {
         get_logger(),
         opts.el_node_url.clone(),
         opts.operator_private_key.clone(),
-        avs_deployment.registry_coordinator,
-        avs_deployment.operator_state_retriever,
+        avs_deployment.addresses.registry_coordinator,
+        avs_deployment.addresses.operator_state_retriever,
     ).await?;
     let tx_hash = avs_writer.create_total_delegated_stake_quorum(
         operator_set_params,
@@ -265,20 +277,20 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
     
     let el_reader = ELChainReader::new(
         get_logger(),
-        Some(el_deployment.allocation_manager),
-        el_deployment.delegation_manager,
-        el_deployment.rewards_coordinator,
-        el_deployment.avs_directory,
-        Some(el_deployment.permission_controller),
+        Some(el_deployment.addresses.allocation_manager),
+        el_deployment.addresses.delegation_manager,
+        el_deployment.addresses.rewards_coordinator,
+        el_deployment.addresses.avs_directory,
+        Some(el_deployment.addresses.permission_controller),
         opts.el_node_url.clone(),
     );
 
     let el_writer = ELChainWriter::new(
-        el_deployment.strategy_manager,
-        el_deployment.rewards_coordinator,
-        Some(el_deployment.permission_controller),
-        Some(el_deployment.allocation_manager),
-        avs_deployment.registry_coordinator,
+        el_deployment.addresses.strategy_manager,
+        el_deployment.addresses.rewards_coordinator,
+        Some(el_deployment.addresses.permission_controller),
+        Some(el_deployment.addresses.allocation_manager),
+        avs_deployment.addresses.registry_coordinator,
         el_reader.clone(),
         opts.el_node_url.clone(),
         opts.operator_private_key.clone(),
@@ -286,7 +298,7 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
 
     let tx_hash = el_writer.register_for_operator_sets(
         operator_address, 
-        avs_deployment.coprocessor_service_manager,
+        avs_deployment.addresses.coprocessor_service_manager,
         vec![0],
         operator_bls_key_pair,
         &opts.operator_socket,
