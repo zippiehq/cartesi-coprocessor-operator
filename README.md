@@ -4,6 +4,9 @@
 * Install Eigenlayer CLI https://github.com/Layr-Labs/eigenlayer-cli/releases/tag/v0.12.0-beta
 * Install Docker - https://docs.docker.com/engine/install/ubuntu/
 
+* If you are not already registered as an Eigenlayer operator on Holesky:
+- Follow steps here: https://docs.eigenlayer.xyz/eigenlayer/operator-guides/operator-installation 
+
 * Create in an appropriate place the operator directory:
 
 ```mkdir -p /srv/cartesi-operator```
