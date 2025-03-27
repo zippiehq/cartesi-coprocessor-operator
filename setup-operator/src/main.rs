@@ -9,24 +9,27 @@ use clap::Parser;
 
 use eigen_client_avsregistry::writer::AvsRegistryChainWriter;
 use eigen_client_elcontracts::{
+    error::ElContractsError,
     reader::ELChainReader,
     writer::ELChainWriter,
 };
 use eigen_common::get_signer;
 use eigen_utils::slashing::{
-    core::allocationmanager::AllocationManager,
+    core::allocationmanager::{AllocationManager, AllocationManager::AllocationManagerErrors},
     middleware::{
         servicemanagerbase::ServiceManagerBase,
-        registrycoordinator::ISlashingRegistryCoordinatorTypes,
+        registrycoordinator::{ISlashingRegistryCoordinatorTypes, RegistryCoordinator},
         stakeregistry::IStakeRegistryTypes,
     },
 };
 use eigen_crypto_bls::BlsKeyPair;
 use eigen_logging::{init_logger, get_logger, log_level::LogLevel};
 
-use alloy_primitives::{Address, FixedBytes, aliases::U96};
+use alloy_primitives::{Address, FixedBytes, aliases::U96, hex};
 use alloy_sol_types::SolCall;
 use alloy_signer_local::PrivateKeySigner;
+use alloy_json_rpc::ErrorPayload;
+use alloy_contract::Error;
 
 #[tokio::main]
 async fn main() {
@@ -35,6 +38,8 @@ async fn main() {
 
     let opts = Options::parse();
 
+    // !!!
+    /*
     if let Err(err) = set_appointee(&opts).await {
         log.fatal("failed to set appointee", &err.to_string());
     }
@@ -42,6 +47,7 @@ async fn main() {
     if let Err(err) = create_total_delegated_stake_quorum(&opts).await {
         log.fatal("failed to create total delegated stake quorum", &err.to_string());
     }
+    */
 
     if let Err(err) = register_for_operator_sets(&opts).await {
         log.fatal("failed to register for operator sets", &err.to_string());
@@ -110,7 +116,6 @@ pub struct AvsDeploymentAddresses {
     pub coprocessor_to_l2: Address,
     pub index_registry: Address,
     pub operator_state_retriever: Address,
-    pub pauser_registry: Address,
     pub proxy_admin: Address,
     pub registry_coordinator: Address,
     pub socket_registry: Address,
@@ -274,6 +279,8 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
     let avs_deployment = opts.avs_deployment()?;
     let operator_address = opts.operator_address()?;
     let operator_bls_key_pair = opts.operator_bls_key_pair()?;
+
+    get_logger().info("registring operator", &operator_address.to_string());
     
     let el_reader = ELChainReader::new(
         get_logger(),
@@ -296,15 +303,77 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
         opts.operator_private_key.clone(),
     );
 
+    // !!!
+    // panic!("{}", operator_address);
+
     let tx_hash = el_writer.register_for_operator_sets(
         operator_address, 
         avs_deployment.addresses.coprocessor_service_manager,
         vec![0],
         operator_bls_key_pair,
         &opts.operator_socket,
-    ).await?;
+    )
+    .await
+    .map_err(decode_custom_error)?;
 
     get_logger().info("tx registerForOperatorSets successfully included", &tx_hash.to_string());
     
     Ok(())
+}
+
+pub fn decode_custom_error(err: ElContractsError) -> anyhow::Error {
+    let msg = err.to_string();
+    if msg.contains("custom error") {
+        let p1 = msg.find("custom error").unwrap();
+        let (_, s) = msg.split_at(p1);
+        let (_, s) = s.split_at("custom error".len() + 1);
+        
+        let data_end = s.find(",").unwrap();
+        let data_hex = &s[0..data_end];
+        
+        let payload_json = serde_json::json!({
+            "code": 3,
+            "message": "execution reverted",
+            "data": data_hex
+        }).to_string();
+        let payload: ErrorPayload = serde_json::from_str(&payload_json).unwrap();
+
+        let decoded = payload.as_decoded_interface_error::<AllocationManagerErrors>().unwrap();
+        let error_msg = match decoded {
+            AllocationManagerErrors::AlreadyMemberOfSet(_) => "AlreadyMemberOfSet",
+            AllocationManagerErrors::CurrentlyPaused(_) => "CurrentlyPaused",
+            AllocationManagerErrors::Empty(_) => "Empty",
+            AllocationManagerErrors::InputAddressZero(_) => "InputAddressZero",
+            AllocationManagerErrors::InputArrayLengthMismatch(_) => "InputArrayLengthMismatch",
+            AllocationManagerErrors::InsufficientMagnitude(_) => "InsufficientMagnitude",
+            AllocationManagerErrors::InvalidAVSRegistrar(_) => "InvalidAVSRegistrar",
+            AllocationManagerErrors::InvalidCaller(_) => "InvalidCaller",
+            AllocationManagerErrors::InvalidNewPausedStatus(_)=> "InvalidNewPausedStatus",
+            AllocationManagerErrors::InvalidOperator(_)=> "InvalidOperator",
+            AllocationManagerErrors::InvalidOperatorSet(_)=> "InvalidOperatorSet",
+            AllocationManagerErrors::InvalidPermissions(_)=> "InvalidPermissions",
+            AllocationManagerErrors::InvalidShortString(_)=> "InvalidShortString",
+            AllocationManagerErrors::InvalidSnapshotOrdering(_)=> "InvalidSnapshotOrdering",
+            AllocationManagerErrors::InvalidWadToSlash(_)=> "InvalidWadToSlash",
+            AllocationManagerErrors::ModificationAlreadyPending(_)=> "ModificationAlreadyPending",
+            AllocationManagerErrors::NonexistentAVSMetadata(_)=> "NonexistentAVSMetadata",
+            AllocationManagerErrors::NotMemberOfSet(_)=> "NotMemberOfSet",
+            AllocationManagerErrors::OnlyPauser(_)=> "OnlyPauser",
+            AllocationManagerErrors::OnlyUnpauser(_)=> "OnlyUnpauser",
+            AllocationManagerErrors::OperatorNotSlashable(_)=> "OperatorNotSlashable",
+            AllocationManagerErrors::OutOfBounds(_)=> "OutOfBounds",
+            AllocationManagerErrors::SameMagnitude(_)=> "SameMagnitude",
+            AllocationManagerErrors::StrategiesMustBeInAscendingOrder(_)=> "StrategiesMustBeInAscendingOrder",
+            AllocationManagerErrors::StrategyAlreadyInOperatorSet(_)=> "StrategyAlreadyInOperatorSet",
+            AllocationManagerErrors::StrategyNotInOperatorSet(_)=> "StrategyNotInOperatorSet",
+            AllocationManagerErrors::StringTooLong(_)=> "StringTooLong",
+            AllocationManagerErrors::UninitializedAllocationDelay(_)=> "UninitializedAllocationDelay",
+        };
+        
+        // !!!
+        panic!("{}", error_msg);
+        anyhow!(error_msg)
+    } else {
+        anyhow!(msg)
+    }    
 }

@@ -15,6 +15,8 @@ eigen-utils = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"
 
 alloy-primitives = "0.8.23"
 alloy-sol-types = "0.8.23"
+alloy-json-rpc = "0.12.6"
+alloy-contract = "0.12.6"
 
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }
 
