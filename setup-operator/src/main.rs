@@ -1,26 +1,18 @@
-use std::{
-    fs::File,
-    path::Path,
-    str::FromStr,
-};
+use std::{fs::File, path::Path, str::FromStr};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
 
 use eigen_client_elcontracts::{
-    error::ElContractsError,
-    reader::ELChainReader,
-    writer::ELChainWriter,
-};
-use eigen_utils::slashing::{
-    core::allocationmanager::AllocationManager::AllocationManagerErrors,
+    error::ElContractsError, reader::ELChainReader, writer::ELChainWriter,
 };
 use eigen_crypto_bls::BlsKeyPair;
-use eigen_logging::{init_logger, get_logger, log_level::LogLevel};
+use eigen_logging::{get_logger, init_logger, log_level::LogLevel};
+use eigen_utils::slashing::core::allocationmanager::AllocationManager::AllocationManagerErrors;
 
+use alloy_json_rpc::ErrorPayload;
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_json_rpc::ErrorPayload;
 
 #[tokio::main]
 async fn main() {
@@ -31,7 +23,7 @@ async fn main() {
 
     if let Err(err) = register_for_operator_sets(&opts).await {
         log.error("failed to register for operator sets", &err.to_string());
-        return
+        return;
     }
 
     log.info("operator successfully registered", "")
@@ -61,7 +53,7 @@ pub struct Options {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EigenlayerDeployment {
-    pub addresses: EigenlayerDeploymentAddresses
+    pub addresses: EigenlayerDeploymentAddresses,
 }
 
 #[derive(serde::Deserialize)]
@@ -84,7 +76,7 @@ pub struct EigenlayerDeploymentAddresses {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvsDeployment {
-    pub addresses: AvsDeploymentAddresses
+    pub addresses: AvsDeploymentAddresses,
 }
 
 #[derive(serde::Deserialize)]
@@ -133,13 +125,13 @@ impl Options {
 }
 
 async fn register_for_operator_sets(opts: &Options) -> Result<()> {
-    let el_deployment  = opts.el_deployment()?;
+    let el_deployment = opts.el_deployment()?;
     let avs_deployment = opts.avs_deployment()?;
     let operator_address = opts.operator_address()?;
     let operator_bls_key_pair = opts.operator_bls_key_pair()?;
 
     get_logger().info("registring operator", &operator_address.to_string());
-    
+
     let el_reader = ELChainReader::new(
         get_logger(),
         Some(el_deployment.addresses.allocation_manager),
@@ -161,14 +153,15 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
         opts.operator_private_key.clone(),
     );
 
-    let result = el_writer.register_for_operator_sets(
-        operator_address, 
-        avs_deployment.addresses.coprocessor_service_manager,
-        vec![0],
-        operator_bls_key_pair,
-        &opts.operator_socket,
-    )
-    .await;
+    let result = el_writer
+        .register_for_operator_sets(
+            operator_address,
+            avs_deployment.addresses.coprocessor_service_manager,
+            vec![0],
+            operator_bls_key_pair,
+            &opts.operator_socket,
+        )
+        .await;
 
     if let Err(ref err) = result {
         if is_custom_error(&err) {
@@ -178,9 +171,11 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
         }
     }
 
-    get_logger().info("tx registerForOperatorSets successfully included",
-        &result.unwrap().to_string());
-    
+    get_logger().info(
+        "tx registerForOperatorSets successfully included",
+        &result.unwrap().to_string(),
+    );
+
     Ok(())
 }
 
@@ -193,22 +188,23 @@ fn decode_custom_error(err: &ElContractsError) -> Result<String> {
     let p1 = msg.find("custom error").expect("not custom error");
     let (_, s) = msg.split_at(p1);
     let (_, s) = s.split_at("custom error".len() + 1);
-        
+
     let data_end = s.find(",").expect("not custom error");
     let data_hex = &s[0..data_end];
-        
+
     let payload_json = serde_json::json!({
         "code": 3,
         "message": "execution reverted",
         "data": data_hex
-    }).to_string();
+    })
+    .to_string();
     let payload: ErrorPayload = serde_json::from_str(&payload_json)?;
 
     let decoded = payload.as_decoded_interface_error::<AllocationManagerErrors>();
     if decoded.is_none() {
         bail!("not an AllocationManager error")
     }
-    
+
     let msg = match decoded.unwrap() {
         AllocationManagerErrors::AlreadyMemberOfSet(_) => "AlreadyMemberOfSet",
         AllocationManagerErrors::CurrentlyPaused(_) => "CurrentlyPaused",
@@ -218,26 +214,28 @@ fn decode_custom_error(err: &ElContractsError) -> Result<String> {
         AllocationManagerErrors::InsufficientMagnitude(_) => "InsufficientMagnitude",
         AllocationManagerErrors::InvalidAVSRegistrar(_) => "InvalidAVSRegistrar",
         AllocationManagerErrors::InvalidCaller(_) => "InvalidCaller",
-        AllocationManagerErrors::InvalidNewPausedStatus(_)=> "InvalidNewPausedStatus",
-        AllocationManagerErrors::InvalidOperator(_)=> "InvalidOperator",
-        AllocationManagerErrors::InvalidOperatorSet(_)=> "InvalidOperatorSet",
-        AllocationManagerErrors::InvalidPermissions(_)=> "InvalidPermissions",
-        AllocationManagerErrors::InvalidShortString(_)=> "InvalidShortString",
-        AllocationManagerErrors::InvalidSnapshotOrdering(_)=> "InvalidSnapshotOrdering",
-        AllocationManagerErrors::InvalidWadToSlash(_)=> "InvalidWadToSlash",
-        AllocationManagerErrors::ModificationAlreadyPending(_)=> "ModificationAlreadyPending",
-        AllocationManagerErrors::NonexistentAVSMetadata(_)=> "NonexistentAVSMetadata",
-        AllocationManagerErrors::NotMemberOfSet(_)=> "NotMemberOfSet",
-        AllocationManagerErrors::OnlyPauser(_)=> "OnlyPauser",
-        AllocationManagerErrors::OnlyUnpauser(_)=> "OnlyUnpauser",
-        AllocationManagerErrors::OperatorNotSlashable(_)=> "OperatorNotSlashable",
-        AllocationManagerErrors::OutOfBounds(_)=> "OutOfBounds",
-        AllocationManagerErrors::SameMagnitude(_)=> "SameMagnitude",
-        AllocationManagerErrors::StrategiesMustBeInAscendingOrder(_)=> "StrategiesMustBeInAscendingOrder",
-        AllocationManagerErrors::StrategyAlreadyInOperatorSet(_)=> "StrategyAlreadyInOperatorSet",
-        AllocationManagerErrors::StrategyNotInOperatorSet(_)=> "StrategyNotInOperatorSet",
-        AllocationManagerErrors::StringTooLong(_)=> "StringTooLong",
-        AllocationManagerErrors::UninitializedAllocationDelay(_)=> "UninitializedAllocationDelay",
+        AllocationManagerErrors::InvalidNewPausedStatus(_) => "InvalidNewPausedStatus",
+        AllocationManagerErrors::InvalidOperator(_) => "InvalidOperator",
+        AllocationManagerErrors::InvalidOperatorSet(_) => "InvalidOperatorSet",
+        AllocationManagerErrors::InvalidPermissions(_) => "InvalidPermissions",
+        AllocationManagerErrors::InvalidShortString(_) => "InvalidShortString",
+        AllocationManagerErrors::InvalidSnapshotOrdering(_) => "InvalidSnapshotOrdering",
+        AllocationManagerErrors::InvalidWadToSlash(_) => "InvalidWadToSlash",
+        AllocationManagerErrors::ModificationAlreadyPending(_) => "ModificationAlreadyPending",
+        AllocationManagerErrors::NonexistentAVSMetadata(_) => "NonexistentAVSMetadata",
+        AllocationManagerErrors::NotMemberOfSet(_) => "NotMemberOfSet",
+        AllocationManagerErrors::OnlyPauser(_) => "OnlyPauser",
+        AllocationManagerErrors::OnlyUnpauser(_) => "OnlyUnpauser",
+        AllocationManagerErrors::OperatorNotSlashable(_) => "OperatorNotSlashable",
+        AllocationManagerErrors::OutOfBounds(_) => "OutOfBounds",
+        AllocationManagerErrors::SameMagnitude(_) => "SameMagnitude",
+        AllocationManagerErrors::StrategiesMustBeInAscendingOrder(_) => {
+            "StrategiesMustBeInAscendingOrder"
+        }
+        AllocationManagerErrors::StrategyAlreadyInOperatorSet(_) => "StrategyAlreadyInOperatorSet",
+        AllocationManagerErrors::StrategyNotInOperatorSet(_) => "StrategyNotInOperatorSet",
+        AllocationManagerErrors::StringTooLong(_) => "StringTooLong",
+        AllocationManagerErrors::UninitializedAllocationDelay(_) => "UninitializedAllocationDelay",
     };
 
     Ok(msg.to_string())
