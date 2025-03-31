@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::ptr::fn_addr_eq;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
 use std::{env::var, error::Error, vec};
