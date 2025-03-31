@@ -5,13 +5,23 @@ edition = "2021"
 
 [dependencies]
 alloy-signer-local = { version = "0.5.3", default-features = false }
-eigen-client-elcontracts = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "f52ed203e54280264b4ae08ed1e953eec34eddd3"}
-eigen-testing-utils = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "f52ed203e54280264b4ae08ed1e953eec34eddd3"}
-eigen-client-avsregistry = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "f52ed203e54280264b4ae08ed1e953eec34eddd3"}
-eigen-logging = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "f52ed203e54280264b4ae08ed1e953eec34eddd3"}
-eigen-crypto-bls = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "f52ed203e54280264b4ae08ed1e953eec34eddd3"}
-eigen-utils = { git = "https://github.com/stskeeps/eigensdk-rs", rev = "f52ed203e54280264b4ae08ed1e953eec34eddd3"}
+eigen-common = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+eigen-client-elcontracts = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+eigen-testing-utils = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+eigen-client-avsregistry = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+eigen-logging = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+eigen-crypto-bls = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+eigen-utils = { git = "https://github.com/Layr-Labs/eigensdk-rs", branch = "dev"}
+
+alloy-primitives = "0.8.23"
+alloy-sol-types = "0.8.23"
+alloy-json-rpc = "0.12.6"
+alloy-contract = "0.12.6"
+
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }
-alloy-primitives = "0.8.7"
+
+anyhow = "1.0.97"
+
 clap = { version = "4.3.10", features = ["derive", "env", "string"] }
 serde_json = "1.0.133"
+serde = "1.0.219"

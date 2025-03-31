@@ -1,143 +1,242 @@
-use alloy_primitives::{Address, Bytes, FixedBytes, U256};
-use alloy_signer_local::PrivateKeySigner;
+use std::{fs::File, path::Path, str::FromStr};
+
+use anyhow::{anyhow, bail, Result};
 use clap::Parser;
-use eigen_client_avsregistry::writer::AvsRegistryChainWriter;
+
 use eigen_client_elcontracts::{
-    reader::ELChainReader,
-    writer::{ELChainWriter, Operator},
+    error::ElContractsError, reader::ELChainReader, writer::ELChainWriter,
 };
 use eigen_crypto_bls::BlsKeyPair;
-use eigen_logging::get_test_logger;
-use eigen_testing_utils::transaction::wait_transaction;
-use eigen_utils::erc20::ERC20;
-use eigen_utils::get_signer;
-use eigen_utils::strategymanager::StrategyManager;
-use setup_operator::Options;
-use std::{
-    fs::File,
-    path::Path,
-    str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use eigen_logging::{get_logger, init_logger, log_level::LogLevel};
+use eigen_utils::slashing::core::allocationmanager::AllocationManager::AllocationManagerErrors;
+
+use alloy_json_rpc::ErrorPayload;
+use alloy_primitives::Address;
+use alloy_signer_local::PrivateKeySigner;
 
 #[tokio::main]
 async fn main() {
-    let opt = Options::parse();
-    let signer = PrivateKeySigner::from_str(&opt.operator_private_key).unwrap();
+    init_logger(LogLevel::Info);
+    let log = get_logger();
 
-    let deployment_parameters_devnet =
-        File::open(Path::new(&opt.chain_writer_reader_addresses)).unwrap();
+    let opts = Options::parse();
 
-    let json: serde_json::Value = serde_json::from_reader(deployment_parameters_devnet).unwrap();
+    if let Err(err) = register_for_operator_sets(&opts).await {
+        log.error("failed to register for operator sets", &err.to_string());
+        return;
+    }
 
-    let delegation_manager_address = Address::parse_checksummed(
-        json.get("delegationManager").unwrap().as_str().unwrap(),
-        None,
-    )
-    .unwrap();
+    log.info("operator successfully registered", "")
+}
 
-    let avs_directory_address =
-        Address::parse_checksummed(json.get("avsDirectory").unwrap().as_str().unwrap(), None)
-            .unwrap();
+#[derive(Parser, Clone, Debug)]
+pub struct Options {
+    #[clap(long, env = "EL_DEPLOYMENT_FILE_PATH")]
+    pub el_deployment_file_path: String,
 
-    let strategy_manager_address =
-        Address::parse_checksummed(json.get("strategyManager").unwrap().as_str().unwrap(), None)
-            .unwrap();
+    #[clap(long, env = "AVS_DEPLOYMENT_FILE_PATH")]
+    pub avs_deployment_file_path: String,
 
-    let rewards_coordinator_address =
-        Address::parse_checksummed(json.get("avsDirectory").unwrap().as_str().unwrap(), None)
-            .unwrap();
+    #[clap(long, env = "OPERATOR_PRIVATE_KEY")]
+    pub operator_private_key: String,
 
-    let el_chain_reader = ELChainReader::new(
-        get_test_logger(),
-        Address::ZERO,
-        delegation_manager_address,
-        avs_directory_address,
-        opt.http_endpoint.to_owned(),
+    #[clap(long, env = "OPERATOR_BLS_KEY")]
+    pub operator_bls_key: String,
+
+    #[clap(long, env = "OPERATOR_SOCKET")]
+    pub operator_socket: String,
+
+    #[clap(long, env = "EL_NODE_URL")]
+    pub el_node_url: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EigenlayerDeployment {
+    pub addresses: EigenlayerDeploymentAddresses,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EigenlayerDeploymentAddresses {
+    pub allocation_manager: Address,
+    pub avs_directory: Address,
+    pub delegation_manager: Address,
+    pub eigen_pod_beacon: Address,
+    pub eigen_pod_manager: Address,
+    pub pauser_registry: Address,
+    pub permission_controller: Address,
+    pub proxy_admin: Address,
+    pub rewards_coordinator: Address,
+    pub strategy_beacon: Address,
+    pub strategy_factory: Address,
+    pub strategy_manager: Address,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvsDeployment {
+    pub addresses: AvsDeploymentAddresses,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvsDeploymentAddresses {
+    pub l1_sender: Address,
+    pub l2_coprocessor: Address,
+    pub l2_coprocessor_caller: Address,
+    pub bls_apk_registry: Address,
+    pub coprocessor: Address,
+    pub coprocessor_service_manager: Address,
+    pub coprocessor_to_l2: Address,
+    pub index_registry: Address,
+    pub operator_state_retriever: Address,
+    pub proxy_admin: Address,
+    pub registry_coordinator: Address,
+    pub socket_registry: Address,
+    pub stake_registry: Address,
+    pub strategy: Address,
+    pub strategy_token: Address,
+    pub slasher: Address,
+}
+
+impl Options {
+    pub fn el_deployment(&self) -> Result<EigenlayerDeployment> {
+        let deployment_file = File::open(Path::new(&self.el_deployment_file_path))?;
+        let deployment: EigenlayerDeployment = serde_json::from_reader(deployment_file)?;
+        Ok(deployment)
+    }
+
+    pub fn avs_deployment(&self) -> Result<AvsDeployment> {
+        let deployment_file = File::open(Path::new(&self.avs_deployment_file_path))?;
+        let deployment: AvsDeployment = serde_json::from_reader(deployment_file)?;
+        Ok(deployment)
+    }
+
+    pub fn operator_address(&self) -> Result<Address> {
+        let signer = PrivateKeySigner::from_str(&self.operator_private_key)?;
+        Ok(signer.address())
+    }
+
+    pub fn operator_bls_key_pair(&self) -> Result<BlsKeyPair> {
+        let key_pair = BlsKeyPair::new(self.operator_bls_key.to_string())?;
+        Ok(key_pair)
+    }
+}
+
+async fn register_for_operator_sets(opts: &Options) -> Result<()> {
+    let el_deployment = opts.el_deployment()?;
+    let avs_deployment = opts.avs_deployment()?;
+    let operator_address = opts.operator_address()?;
+    let operator_bls_key_pair = opts.operator_bls_key_pair()?;
+
+    get_logger().info("registring operator", &operator_address.to_string());
+
+    let el_reader = ELChainReader::new(
+        get_logger(),
+        Some(el_deployment.addresses.allocation_manager),
+        el_deployment.addresses.delegation_manager,
+        el_deployment.addresses.rewards_coordinator,
+        el_deployment.addresses.avs_directory,
+        Some(el_deployment.addresses.permission_controller),
+        opts.el_node_url.clone(),
     );
 
-    let el_chain_writer = ELChainWriter::new(
-        delegation_manager_address,
-        strategy_manager_address,
-        rewards_coordinator_address,
-        el_chain_reader.clone(),
-        opt.http_endpoint.to_string(),
-        opt.operator_private_key.to_string(),
+    let el_writer = ELChainWriter::new(
+        el_deployment.addresses.strategy_manager,
+        el_deployment.addresses.rewards_coordinator,
+        Some(el_deployment.addresses.permission_controller),
+        Some(el_deployment.addresses.allocation_manager),
+        avs_deployment.addresses.registry_coordinator,
+        el_reader.clone(),
+        opts.el_node_url.clone(),
+        opts.operator_private_key.clone(),
     );
 
-    let operator_details = Operator {
-        address: signer.address(),
-        earnings_receiver_address: signer.address(),
-        delegation_approver_address: signer.address(),
-        staker_opt_out_window_blocks: 3,
-        metadata_url: Some("eigensdk-rs".to_string()),
+    let result = el_writer
+        .register_for_operator_sets(
+            operator_address,
+            avs_deployment.addresses.coprocessor_service_manager,
+            vec![0],
+            operator_bls_key_pair,
+            &opts.operator_socket,
+        )
+        .await;
+
+    if let Err(ref err) = result {
+        if is_custom_error(&err) {
+            let msg = decode_custom_error(&err)
+                .map_err(|err| anyhow!("failed to decode custom errror: {}", err))?;
+            bail!("{}: {}", err, msg)
+        }
+    }
+
+    get_logger().info(
+        "tx registerForOperatorSets successfully included",
+        &result.unwrap().to_string(),
+    );
+
+    Ok(())
+}
+
+fn is_custom_error(err: &ElContractsError) -> bool {
+    err.to_string().contains("custom error")
+}
+
+fn decode_custom_error(err: &ElContractsError) -> Result<String> {
+    let msg = err.to_string();
+    let p1 = msg.find("custom error").expect("not custom error");
+    let (_, s) = msg.split_at(p1);
+    let (_, s) = s.split_at("custom error".len() + 1);
+
+    let data_end = s.find(",").expect("not custom error");
+    let data_hex = &s[0..data_end];
+
+    let payload_json = serde_json::json!({
+        "code": 3,
+        "message": "execution reverted",
+        "data": data_hex
+    })
+    .to_string();
+    let payload: ErrorPayload = serde_json::from_str(&payload_json)?;
+
+    let decoded = payload.as_decoded_interface_error::<AllocationManagerErrors>();
+    if decoded.is_none() {
+        bail!("not an AllocationManager error")
+    }
+
+    let msg = match decoded.unwrap() {
+        AllocationManagerErrors::AlreadyMemberOfSet(_) => "AlreadyMemberOfSet",
+        AllocationManagerErrors::CurrentlyPaused(_) => "CurrentlyPaused",
+        AllocationManagerErrors::Empty(_) => "Empty",
+        AllocationManagerErrors::InputAddressZero(_) => "InputAddressZero",
+        AllocationManagerErrors::InputArrayLengthMismatch(_) => "InputArrayLengthMismatch",
+        AllocationManagerErrors::InsufficientMagnitude(_) => "InsufficientMagnitude",
+        AllocationManagerErrors::InvalidAVSRegistrar(_) => "InvalidAVSRegistrar",
+        AllocationManagerErrors::InvalidCaller(_) => "InvalidCaller",
+        AllocationManagerErrors::InvalidNewPausedStatus(_) => "InvalidNewPausedStatus",
+        AllocationManagerErrors::InvalidOperator(_) => "InvalidOperator",
+        AllocationManagerErrors::InvalidOperatorSet(_) => "InvalidOperatorSet",
+        AllocationManagerErrors::InvalidPermissions(_) => "InvalidPermissions",
+        AllocationManagerErrors::InvalidShortString(_) => "InvalidShortString",
+        AllocationManagerErrors::InvalidSnapshotOrdering(_) => "InvalidSnapshotOrdering",
+        AllocationManagerErrors::InvalidWadToSlash(_) => "InvalidWadToSlash",
+        AllocationManagerErrors::ModificationAlreadyPending(_) => "ModificationAlreadyPending",
+        AllocationManagerErrors::NonexistentAVSMetadata(_) => "NonexistentAVSMetadata",
+        AllocationManagerErrors::NotMemberOfSet(_) => "NotMemberOfSet",
+        AllocationManagerErrors::OnlyPauser(_) => "OnlyPauser",
+        AllocationManagerErrors::OnlyUnpauser(_) => "OnlyUnpauser",
+        AllocationManagerErrors::OperatorNotSlashable(_) => "OperatorNotSlashable",
+        AllocationManagerErrors::OutOfBounds(_) => "OutOfBounds",
+        AllocationManagerErrors::SameMagnitude(_) => "SameMagnitude",
+        AllocationManagerErrors::StrategiesMustBeInAscendingOrder(_) => {
+            "StrategiesMustBeInAscendingOrder"
+        }
+        AllocationManagerErrors::StrategyAlreadyInOperatorSet(_) => "StrategyAlreadyInOperatorSet",
+        AllocationManagerErrors::StrategyNotInOperatorSet(_) => "StrategyNotInOperatorSet",
+        AllocationManagerErrors::StringTooLong(_) => "StringTooLong",
+        AllocationManagerErrors::UninitializedAllocationDelay(_) => "UninitializedAllocationDelay",
     };
 
-    /* let _ = el_chain_writer
-        .register_as_operator(operator_details)
-        .await
-        .unwrap();
-    */
-
-    let provider = get_signer(
-        &opt.operator_private_key.to_string(),
-        &opt.http_endpoint.to_string(),
-    );
-
-    let coprocessor_deployment_output_devnet =
-        File::open(Path::new(&opt.avs_registry_writer_addresses)).unwrap();
-
-    let json: serde_json::Value =
-        serde_json::from_reader(coprocessor_deployment_output_devnet).unwrap();
-
-    let registry_coordinator = Address::parse_checksummed(
-        json.get("addresses")
-            .unwrap()
-            .get("registryCoordinator")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        None,
-    )
-    .unwrap();
-
-    let operator_state_retriever = Address::parse_checksummed(
-        json.get("addresses")
-            .unwrap()
-            .get("operatorStateRetriever")
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        None,
-    )
-    .unwrap();
-    let avs_registry_writer = AvsRegistryChainWriter::build_avs_registry_chain_writer(
-        get_test_logger(),
-        opt.http_endpoint.to_string(),
-        opt.operator_private_key.to_string(),
-        registry_coordinator,
-        operator_state_retriever,
-    )
-    .await
-    .unwrap();
-
-    let bls_key_pair = BlsKeyPair::new(opt.operator_bls_key.to_string()).unwrap();
-    let salt: FixedBytes<32> = FixedBytes::from([0x03; 32]);
-    let now = SystemTime::now();
-    let seconds_since_epoch = now.duration_since(UNIX_EPOCH).unwrap().as_secs();
-    let expiry = U256::from(seconds_since_epoch) + U256::from(10000);
-    let quorum_numbers = Bytes::from_str("0x00").unwrap();
-
-    let tx_hash = avs_registry_writer
-        .register_operator_in_quorum_with_avs_registry_coordinator(
-            bls_key_pair,
-            salt,
-            expiry,
-            quorum_numbers,
-            opt.socket,
-        )
-        .await
-        .unwrap();
-    wait_transaction(&opt.http_endpoint, tx_hash).await.unwrap();
-    println!("setup_operator finished");
+    Ok(msg.to_string())
 }
