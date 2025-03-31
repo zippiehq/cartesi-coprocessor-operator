@@ -17,7 +17,7 @@ rs-car-ipfs = { git = "https://github.com/zippiehq/rs-car-ipfs", rev = "2d893af9
 ipfs-api-backend-hyper = { version = "0.6.0", features = ["with-send-sync"], default-features = false }
 futures = "0.3"
 cid = "0.8.6"
-alloy-primitives = "0.8.7"
+alloy-primitives = "0.8.25"
 alloy-provider = "0.8.1"
 alloy-rpc-types-eth = "0.8.1"
 alloy-rlp = "0.3.11"
