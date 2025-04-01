@@ -7,7 +7,7 @@ if [ -z "$BLS_PRIVATE_KEY" ]; then
  	exit 1
 fi
 
-if [ -z "$IPFS_URL" ] then
+if [ -z "$IPFS_URL" ]; then
 	if [ ! -e /data/ipfs ]; then
 	  mkdir -p /data/ipfs
 	  IPFS_PATH=/data/ipfs ipfs init --profile=server
