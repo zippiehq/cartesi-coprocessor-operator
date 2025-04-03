@@ -59,6 +59,7 @@ COPY --from=builder /setup-operator/target/release/setup-operator /operator/setu
 COPY --from=builder /requests-test/target/release/requests-test /operator/requests-test
 
 RUN curl -L https://foundry.paradigm.xyz | bash
+RUN curl -sSfL https://raw.githubusercontent.com/layr-labs/eigenlayer-cli/master/scripts/install.sh | sh -s -- v0.12.0-beta3
 ARG TARGETARCH
 RUN curl -LO https://github.com/ipfs/kubo/releases/download/v0.30.0/kubo_v0.30.0_linux-$TARGETARCH.tar.gz && \
     tar -xvzf kubo_v0.30.0_linux-$TARGETARCH.tar.gz && \
