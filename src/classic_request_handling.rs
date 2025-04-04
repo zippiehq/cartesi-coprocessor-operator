@@ -250,6 +250,7 @@ pub(crate) async fn handle_database_request(
                 match std::env::var("BLS_PRIVATE_KEY") {
                     Ok(bls_private_key) => {
                         let signature_bls = sign_bls(
+                            response.0.finish_result.0,
                             bls_private_key,
                             &classic_request.ruleset_bytes,
                             &classic_request
@@ -295,6 +296,7 @@ pub(crate) async fn handle_database_request(
 
 #[cfg(feature = "bls_signing")]
 async fn sign_bls(
+    finish_reason: u16,
     bls_private_key: String,
     ruleset_bytes: &Vec<u8>,
     machine_hash: &str,
@@ -304,8 +306,14 @@ async fn sign_bls(
     tracing::info!("Starting BLS signing process");
     let eigen_signer = SignerEigen::new(bls_private_key);
 
-    let keccak256_hash =
-        get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec).unwrap();
+    let keccak256_hash = get_data_for_signing(
+        finish_reason,
+        &ruleset_bytes,
+        machine_hash,
+        &payload,
+        &finish_result_vec,
+    )
+    .unwrap();
     tracing::debug!("Keccak256 hash for BLS signing: {:?}", keccak256_hash);
 
     let signature_hex = eigen_signer.sign(&keccak256_hash);
@@ -316,6 +324,7 @@ async fn sign_bls(
 
 #[cfg(feature = "nitro_attestation")]
 async fn get_nitro_attestation(
+    finish_reason: u16,
     ruleset_bytes: &Vec<u8>,
     machine_hash: &str,
     payload: &Vec<u8>,
@@ -323,8 +332,14 @@ async fn get_nitro_attestation(
 ) -> String {
     tracing::info!("Starting Nitro attestation process");
 
-    let keccak256_hash =
-        get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec).unwrap();
+    let keccak256_hash = get_data_for_signing(
+        finish_reason,
+        &ruleset_bytes,
+        machine_hash,
+        &payload,
+        &finish_result_vec,
+    )
+    .unwrap();
     tracing::debug!("Keccak256 hash for Nitro attestation: {:?}", keccak256_hash);
 
     let attestation_doc = BASE64_STANDARD.encode(get_attestation(keccak256_hash.as_slice()).await);
@@ -368,12 +383,14 @@ pub(crate) async fn handle_classic(
         reports_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
+
     let mut finish_callback = |reason: u16, payload: &[u8]| {
         tracing::info!(
             "Finish callback called with reason: {}, payload: {:?}",
             reason,
             payload
         );
+
         let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         finish_result = result.as_mut().unwrap().clone();
         return result;
@@ -669,8 +686,7 @@ pub(crate) async fn handle_classic(
             callbacks,
             no_console_putchar,
         )
-        .await
-        .unwrap();
+        .await?;
 
         Ok((
             RunAdvanceResponses {

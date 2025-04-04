@@ -2237,12 +2237,18 @@ async fn dedup_download_directory(
 }
 
 fn get_data_for_signing(
+    finish_reason: u16,
     ruleset_bytes: &Vec<u8>,
     machine_hash: &str,
     payload: &Vec<u8>,
     finish_result: &Vec<u8>,
 ) -> Result<FixedBytes<32>, FromHexError> {
-    let mut buffer = vec![0u8; 12];
+    let mut buffer = vec![0u8; 30];
+
+    let finish_reason_bytes = finish_reason.to_be_bytes();
+    buffer.extend_from_slice(&finish_reason_bytes);
+    buffer.extend_from_slice(&[0u8; 12]);
+
     buffer.extend_from_slice(&ruleset_bytes);
 
     let machine_hash_bytes = hex::decode(machine_hash)?;
