@@ -519,7 +519,7 @@ async fn main() {
                                         reports_vector,
                                         finish_result,
                                         reason,
-                                        error_code
+                                        error_code,
                                     )) => {
                                         let mut keccak_outputs = Vec::new();
 
@@ -680,7 +680,7 @@ async fn main() {
                                     reports_vector,
                                     finish_result,
                                     reason,
-                                    error_code
+                                    error_code,
                                 )) => {
                                     let mut keccak_outputs = Vec::new();
 
