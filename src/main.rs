@@ -768,10 +768,8 @@ async fn main() {
                                         tracing::info!("BLS signature generated successfully");
 
                                         if reason == Some(YieldManualReason::Accepted) {
-                                            json_response["finish_callback"] = serde_json::json!([
-                                                error_code,
-                                                finish_result
-                                            ]);
+                                            json_response["finish_callback"] =
+                                                serde_json::json!([error_code, finish_result]);
                                         } else {
                                             json_response["finish_callback"] = serde_json::json!([
                                                 error_code,
@@ -2078,15 +2076,11 @@ async fn generate_proofs(
         tracing::info!("BLS signature generated successfully");
 
         if reason == Some(YieldManualReason::Accepted) {
-            json_response["finish_callback"] = serde_json::json!([
-                error_code,
-                finish_result
-            ]);
+            json_response["finish_callback"] =
+                serde_json::json!([error_code, finish_result]);
         } else {
-            json_response["finish_callback"] = serde_json::json!([
-                error_code,
-                finish_result.clone().unwrap().1
-            ]);
+            json_response["finish_callback"] =
+                serde_json::json!([error_code, finish_result.clone().unwrap().1]);
         }
         json_response["signature"] = serde_json::Value::String(signature_hex);
     }
