@@ -127,6 +127,7 @@ pub(crate) fn query_result_from_database(
                     4 => Some(YieldManualReason::Exception),
                     _ => None,
                 };
+
                 return Ok((outputs_vector, reports_vector, finish_result, reason));
             }
             Ok(error_message) => {
@@ -211,7 +212,7 @@ pub(crate) async fn handle_database_request(
                 "Error handling classic request: {}",
                 err
             );
-            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string()]).unwrap();
+            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority]).unwrap();
         }
     }
     let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
@@ -261,12 +262,14 @@ pub(crate) async fn handle_classic(
         reports_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
+
     let mut finish_callback = |reason: u16, payload: &[u8]| {
         tracing::info!(
             "Finish callback called with reason: {}, payload: {:?}",
             reason,
             payload
         );
+
         let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         finish_result = result.as_mut().unwrap().clone();
         return result;
@@ -561,8 +564,7 @@ pub(crate) async fn handle_classic(
             callbacks,
             no_console_putchar,
         )
-        .await
-        .unwrap();
+        .await?;
 
         Ok((
             RunAdvanceResponses {
