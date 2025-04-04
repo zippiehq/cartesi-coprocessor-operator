@@ -514,7 +514,13 @@ async fn main() {
                             for id in ids {
                                 let sqlite_connection = pool.get().unwrap();
                                 match query_result_from_database(sqlite_connection, &(id as i64)) {
-                                    Ok((outputs_vector, reports_vector, finish_result, reason, error_code)) => {
+                                    Ok((
+                                        outputs_vector,
+                                        reports_vector,
+                                        finish_result,
+                                        reason,
+                                        error_code
+                                    )) => {
                                         let mut keccak_outputs = Vec::new();
 
                                         // Generating proofs for each output
@@ -669,7 +675,13 @@ async fn main() {
                             let result_from_database =
                                 query_result_from_database(sqlite_connection, &id);
                             match result_from_database {
-                                Ok((outputs_vector, reports_vector, finish_result, reason, error_code)) => {
+                                Ok((
+                                    outputs_vector,
+                                    reports_vector,
+                                    finish_result,
+                                    reason,
+                                    error_code
+                                )) => {
                                     let mut keccak_outputs = Vec::new();
 
                                     // Generating proofs for each output
@@ -759,13 +771,18 @@ async fn main() {
                                             json_response["finish_callback"] =
                                                 serde_json::json!(error_code, finish_result);
                                         } else {
-                                            json_response["finish_callback"] =
-                                                serde_json::json!(error_code, finish_result.unwrap().1);
+                                            json_response["finish_callback"] = serde_json::json!(
+                                                error_code,
+                                                finish_result.unwrap().1
+                                            );
                                         }
                                         json_response["signature"] =
                                             serde_json::Value::String(signature_hex);
                                     } else {
-                                        json_response["finish_callback"] = serde_json::json!([error_code, finish_result.clone().unwrap().1]);
+                                        json_response["finish_callback"] = serde_json::json!([
+                                            error_code,
+                                            finish_result.clone().unwrap().1
+                                        ]);
                                     }
                                     let json_response =
                                         serde_json::to_string(&json_response).unwrap();
@@ -2061,7 +2078,8 @@ async fn generate_proofs(
         if reason == Some(YieldManualReason::Accepted) {
             json_response["finish_callback"] = serde_json::json!(error_code, finish_result);
         } else {
-            json_response["finish_callback"] = serde_json::json!(error_code, finish_result.clone().unwrap().1);
+            json_response["finish_callback"] =
+                serde_json::json!(error_code, finish_result.clone().unwrap().1);
         }
         json_response["signature"] = serde_json::Value::String(signature_hex);
     }
