@@ -134,7 +134,7 @@ pub(crate) fn query_result_from_database(
                     Err(_) => 0,
                 };
 
-                return Ok((outputs_vector, reports_vector, finish_result, reason));
+                return Ok((outputs_vector, reports_vector, finish_result, reason, 0));
             }
             Ok(error_message) => {
                 tracing::error!(id = ?id, error = ?error_message, "Database query error occurred");
@@ -610,6 +610,7 @@ pub(crate) struct RunAdvanceResponses {
     pub outputs_vector: Vec<(u16, Vec<u8>)>,
     pub reports_vector: Vec<(u16, Vec<u8>)>,
     pub finish_result: (u16, Vec<u8>),
+    pub error_code: u8,
 }
 
 pub(crate) struct ClassicRequest {
