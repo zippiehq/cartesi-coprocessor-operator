@@ -134,7 +134,7 @@ pub(crate) fn query_result_from_database(
                     Err(_) => 0,
                 };
 
-                return Ok((outputs_vector, reports_vector, finish_result, reason, 0));
+                return Ok((outputs_vector, reports_vector, finish_result, reason, error_code));
             }
             Ok(error_message) => {
                 tracing::error!(id = ?id, error = ?error_message, "Database query error occurred");
