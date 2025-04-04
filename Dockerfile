@@ -1,4 +1,4 @@
-FROM rust:latest as base
+FROM rust:1.85.1 as base
 RUN apt-get update && apt-get install -y protobuf-compiler clang libboost1.81-dev git
 
 FROM base as operator-cache
@@ -28,7 +28,7 @@ COPY requests-test/Cargo.lock /requests-test/Cargo.lock
 RUN mkdir -p /requests-test/src && echo 'fn main() {panic!()}' > /requests-test/src/main.rs
 RUN cargo build --release
 
-FROM rust:latest AS builder
+FROM rust:1.85.1 AS builder
 RUN apt-get update && apt-get install -y protobuf-compiler clang libboost1.81-dev
 
 WORKDIR /operator

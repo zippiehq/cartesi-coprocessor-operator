@@ -274,7 +274,15 @@ async fn main() {
             no_console_putchar    INTEGER CHECK (no_console_putchar IN (1, 0)) NOT NULL,
             priority              INTEGER,
             error_message         TEXT
+            error_code            INTEGER NOT NULL DEFAULT 0,
             );",
+            params![],
+        )
+        .unwrap();
+
+    sqlite_connect
+        .execute(
+            "ALTER TABLE results ADD COLUMN IF NOT EXISTS error_code INTEGER NOT NULL DEFAULT 0;",
             params![],
         )
         .unwrap();
@@ -506,7 +514,13 @@ async fn main() {
                             for id in ids {
                                 let sqlite_connection = pool.get().unwrap();
                                 match query_result_from_database(sqlite_connection, &(id as i64)) {
-                                    Ok((outputs_vector, reports_vector, finish_result, reason)) => {
+                                    Ok((
+                                        outputs_vector,
+                                        reports_vector,
+                                        finish_result,
+                                        reason,
+                                        error_code,
+                                    )) => {
                                         let mut keccak_outputs = Vec::new();
 
                                         // Generating proofs for each output
@@ -539,7 +553,7 @@ async fn main() {
                                         let mut json_id = serde_json::json!({
                                            "outputs_callback_vector": &outputs_vector,
                                            "reports_callback_vector": &reports_vector,
-                                           "finish_callback_vector": &finish_result,
+                                           "finish_callback_vector": [error_code, &finish_result.unwrap().1],
 
                                         });
                                         json_response[id.to_string()] = json_id;
@@ -661,7 +675,13 @@ async fn main() {
                             let result_from_database =
                                 query_result_from_database(sqlite_connection, &id);
                             match result_from_database {
-                                Ok((outputs_vector, reports_vector, finish_result, reason)) => {
+                                Ok((
+                                    outputs_vector,
+                                    reports_vector,
+                                    finish_result,
+                                    reason,
+                                    error_code,
+                                )) => {
                                     let mut keccak_outputs = Vec::new();
 
                                     // Generating proofs for each output
@@ -749,13 +769,20 @@ async fn main() {
 
                                         if reason == Some(YieldManualReason::Accepted) {
                                             json_response["finish_callback"] =
-                                                serde_json::json!(finish_result);
+                                                serde_json::json!([error_code, finish_result]);
                                         } else {
-                                            json_response["finish_callback"] =
-                                                serde_json::json!(finish_result.unwrap().1);
+                                            json_response["finish_callback"] = serde_json::json!([
+                                                error_code,
+                                                finish_result.unwrap().1
+                                            ]);
                                         }
                                         json_response["signature"] =
                                             serde_json::Value::String(signature_hex);
+                                    } else {
+                                        json_response["finish_callback"] = serde_json::json!([
+                                            error_code,
+                                            finish_result.clone().unwrap().1
+                                        ]);
                                     }
                                     let json_response =
                                         serde_json::to_string(&json_response).unwrap();
@@ -1989,6 +2016,7 @@ async fn generate_proofs(
     payload: &Vec<u8>,
     ruleset_bytes: &Vec<u8>,
     max_ops: i64,
+    error_code: u8,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut keccak_outputs = Vec::new();
 
@@ -2048,9 +2076,10 @@ async fn generate_proofs(
         tracing::info!("BLS signature generated successfully");
 
         if reason == Some(YieldManualReason::Accepted) {
-            json_response["finish_callback"] = serde_json::json!(finish_result);
+            json_response["finish_callback"] = serde_json::json!([error_code, finish_result]);
         } else {
-            json_response["finish_callback"] = serde_json::json!(finish_result.clone().unwrap().1);
+            json_response["finish_callback"] =
+                serde_json::json!([error_code, finish_result.clone().unwrap().1]);
         }
         json_response["signature"] = serde_json::Value::String(signature_hex);
     }
