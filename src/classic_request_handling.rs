@@ -139,7 +139,7 @@ pub(crate) fn query_result_from_database(
                     reports_vector,
                     finish_result,
                     reason,
-                    error_code
+                    error_code,
                 ));
             }
             Ok(error_message) => {
