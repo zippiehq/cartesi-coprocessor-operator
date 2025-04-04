@@ -102,6 +102,7 @@ pub(crate) fn query_result_from_database(
         Option<Vec<(u16, Vec<u8>)>>,
         Option<(u16, Vec<u8>)>,
         Option<advance_runner::YieldManualReason>,
+        u8,
     ),
     Box<dyn Error>,
 > {
@@ -127,6 +128,12 @@ pub(crate) fn query_result_from_database(
                     4 => Some(YieldManualReason::Exception),
                     _ => None,
                 };
+
+                let error_code: u8 = match statement.get::<_, i64>(10) {
+                    Ok(code) => code as u8,
+                    Err(_) => 0,
+                };
+
                 return Ok((outputs_vector, reports_vector, finish_result, reason));
             }
             Ok(error_message) => {
@@ -136,7 +143,7 @@ pub(crate) fn query_result_from_database(
         }
     }
     tracing::info!(id = ?id, "No results found in database");
-    return Ok((None, None, None, None));
+    return Ok((None, None, None, None, 0));
 }
 
 #[instrument(skip(sqlite_connection, new_record), fields(waiting_for_data = false))]
@@ -203,7 +210,7 @@ pub(crate) async fn handle_database_request(
                 "Inserting successful result into database"
             );
 
-            sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority]).unwrap();
+            sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority, error_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, response.0.error_code as i64]).unwrap();
         }
         Err(err) => {
             tracing::error!(
@@ -211,7 +218,7 @@ pub(crate) async fn handle_database_request(
                 "Error handling classic request: {}",
                 err
             );
-            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string()]).unwrap();
+            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message, error_code) VALUES (?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string(), 0 as i64]).unwrap();
         }
     }
     let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
@@ -261,12 +268,25 @@ pub(crate) async fn handle_classic(
         reports_vector.push(result.as_mut().unwrap().clone());
         return result;
     };
+    let mut error_code = 0;
+
     let mut finish_callback = |reason: u16, payload: &[u8]| {
         tracing::info!(
             "Finish callback called with reason: {}, payload: {:?}",
             reason,
             payload
         );
+
+        if let Ok(json_value) = serde_json::from_slice::<serde_json::Value>(payload) {
+            if json_value.is_array() && json_value.as_array().unwrap().len() == 2 {
+                let array = json_value.as_array().unwrap();
+                if array[0].is_number() {
+                    error_code = array[0].as_u64().unwrap_or(0) as u8;
+                    tracing::info!("Extracted error_code: {}", error_code);
+                }
+            }
+        }
+
         let mut result: Result<(u16, Vec<u8>), Box<dyn Error>> = Ok((reason, payload.to_vec()));
         finish_result = result.as_mut().unwrap().clone();
         return result;
@@ -569,6 +589,7 @@ pub(crate) async fn handle_classic(
                 outputs_vector,
                 reports_vector,
                 finish_result,
+                error_code,
             },
             reason,
         ))
