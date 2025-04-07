@@ -2,6 +2,7 @@ use std::{fs::File, path::Path, str::FromStr};
 
 use anyhow::{anyhow, bail, Result};
 use clap::Parser;
+use url::Url;
 
 use eigen_client_elcontracts::{
     error::ElContractsError, reader::ELChainReader, writer::ELChainWriter,
@@ -11,7 +12,9 @@ use eigen_logging::{get_logger, init_logger, log_level::LogLevel};
 use eigen_utils::slashing::core::allocationmanager::AllocationManager::AllocationManagerErrors;
 
 use alloy_json_rpc::ErrorPayload;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, TxHash};
+use alloy_provider::{PendingTransactionBuilder, PendingTransactionError, ProviderBuilder};
+use alloy_rpc_types::eth::TransactionReceipt;
 use alloy_signer_local::PrivateKeySigner;
 
 #[tokio::main]
@@ -163,17 +166,27 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
         )
         .await;
 
-    if let Err(ref err) = result {
+    let tx_hash = if let Err(ref err) = result {
         if is_custom_error(&err) {
             let msg = decode_custom_error(&err)
                 .map_err(|err| anyhow!("failed to decode custom errror: {}", err))?;
             bail!("{}: {}", err, msg)
+        } else {
+            bail!("failed to send registerForOperatorSets tx: {}", err)
         }
-    }
+    } else {
+        result.unwrap()
+    };
+
+    get_logger().info("tx registerForOperatorSets sent", &tx_hash.to_string());
+
+    let el_node_url =
+        Url::parse(&opts.el_node_url).map_err(|err| anyhow!("invalid rpc url: {}", err))?;
+    wait_for_pendig_tx(el_node_url, tx_hash).await?;
 
     get_logger().info(
         "tx registerForOperatorSets successfully included",
-        &result.unwrap().to_string(),
+        &tx_hash.to_string(),
     );
 
     Ok(())
@@ -239,4 +252,16 @@ fn decode_custom_error(err: &ElContractsError) -> Result<String> {
     };
 
     Ok(msg.to_string())
+}
+
+pub async fn wait_for_pendig_tx(
+    el_node_url: Url,
+    tx_hash: TxHash,
+) -> Result<TransactionReceipt, PendingTransactionError> {
+    let root_provider = ProviderBuilder::new()
+        .disable_recommended_fillers()
+        .on_http(el_node_url);
+
+    let pending_tx = PendingTransactionBuilder::new(root_provider, tx_hash);
+    pending_tx.get_receipt().await
 }
