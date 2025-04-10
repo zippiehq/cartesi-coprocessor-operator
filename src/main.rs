@@ -539,7 +539,7 @@ async fn main() {
                                         let mut json_id = serde_json::json!({
                                            "outputs_callback_vector": &outputs_vector,
                                            "reports_callback_vector": &reports_vector,
-                                           "finish_callback_vector": &finish_result,
+                                           "finish_callback_vector": &finish_result.unwrap().1,
 
                                         });
                                         json_response[id.to_string()] = json_id;
@@ -703,6 +703,7 @@ async fn main() {
                                             finish_result.as_ref().unwrap().1.clone();
 
                                         let keccak256_hash = get_data_for_signing(
+                                            &finish_reason,
                                             &ruleset_bytes,
                                             machine_hash,
                                             &payload,
@@ -732,7 +733,11 @@ async fn main() {
                                         let finish_result_vec =
                                             finish_result.as_ref().unwrap().1.clone();
 
+                                        let finish_reason =
+                                            finish_result.as_ref().unwrap().0.clone();
+
                                         let keccak256_hash = get_data_for_signing(
+                                            finish_reason,
                                             &ruleset_bytes,
                                             machine_hash,
                                             &payload,
@@ -756,6 +761,9 @@ async fn main() {
                                         }
                                         json_response["signature"] =
                                             serde_json::Value::String(signature_hex);
+                                    } else {
+                                        json_response["finish_callback"] =
+                                            serde_json::json!(finish_result.clone().unwrap().1);
                                     }
                                     let json_response =
                                         serde_json::to_string(&json_response).unwrap();
@@ -2019,9 +2027,21 @@ async fn generate_proofs(
         tracing::info!("Starting Nitro attestation process");
         let finish_result_vec = finish_result.as_ref().unwrap().1.clone();
 
-        let keccak256_hash =
-            get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec)
-                .unwrap();
+        let finish_reason = finish_result.as_ref().unwrap().0.clone();
+
+        let keccak256_hash = get_data_for_signing(
+            finish_reason,
+            &ruleset_bytes,
+            machine_hash,
+            &payload,
+            &finish_result_vec,
+        )
+        .unwrap();
+
+        println!(
+            "keccak256 for BLS signing: 0x{}",
+            hex::encode(keccak256_hash.0)
+        );
         tracing::debug!("Keccak256 hash for Nitro attestation: {:?}", keccak256_hash);
 
         let attestation_doc =
@@ -2039,18 +2059,26 @@ async fn generate_proofs(
 
         let finish_result_vec = finish_result.as_ref().unwrap().1.clone();
 
-        let keccak256_hash =
-            get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec)
-                .unwrap();
+        let finish_reason = finish_result.as_ref().unwrap().0.clone();
+
+        let keccak256_hash = get_data_for_signing(
+            finish_reason,
+            &ruleset_bytes,
+            machine_hash,
+            &payload,
+            &finish_result_vec,
+        )
+        .unwrap();
         tracing::debug!("Keccak256 hash for BLS signing: {:?}", keccak256_hash);
 
         let signature_hex = eigen_signer.sign(&keccak256_hash);
         tracing::info!("BLS signature generated successfully");
 
         if reason == Some(YieldManualReason::Accepted) {
-            json_response["finish_callback"] = serde_json::json!(finish_result);
+            json_response["finish_callback"] = serde_json::json!([finish_result]);
         } else {
-            json_response["finish_callback"] = serde_json::json!(finish_result.clone().unwrap().1);
+            json_response["finish_callback"] =
+                serde_json::json!([finish_result.clone().unwrap().1]);
         }
         json_response["signature"] = serde_json::Value::String(signature_hex);
     }
@@ -2297,12 +2325,18 @@ async fn dedup_download_directory(
 }
 
 fn get_data_for_signing(
+    finish_reason: u16,
     ruleset_bytes: &Vec<u8>,
     machine_hash: &str,
     payload: &Vec<u8>,
     finish_result: &Vec<u8>,
 ) -> Result<FixedBytes<32>, FromHexError> {
-    let mut buffer = vec![0u8; 12];
+    let mut buffer = vec![0u8; 30];
+
+    let finish_reason_bytes = finish_reason.to_be_bytes();
+    buffer.extend_from_slice(&finish_reason_bytes);
+    buffer.extend_from_slice(&[0u8; 12]);
+
     buffer.extend_from_slice(&ruleset_bytes);
 
     let machine_hash_bytes = hex::decode(machine_hash)?;
