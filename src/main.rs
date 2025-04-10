@@ -2038,7 +2038,10 @@ async fn generate_proofs(
         )
         .unwrap();
 
-        println!("keccak256 for BLS signing: 0x{}", hex::encode(keccak256_hash.0));
+        println!(
+            "keccak256 for BLS signing: 0x{}",
+            hex::encode(keccak256_hash.0)
+        );
         tracing::debug!("Keccak256 hash for Nitro attestation: {:?}", keccak256_hash);
 
         let attestation_doc =
