@@ -34,8 +34,8 @@ const PUT_IMAGE_KECCAK256_GIO: u32 = 0x2c;
 const PUT_IMAGE_SHA256_GIO: u32 = 0x2d;
 const PREIMAGE_HINT_GIO: u32 = 0x2e;
 
-const HINT_ETH_CODE_PREIMAGE: u16 = 1;
-const HINT_ETH_BLOCK_PREIMAGE: u16 = 2;
+const HINT_ETH_CODE_PREIMAGE: u8 = 1;
+const HINT_ETH_BLOCK_PREIMAGE: u8 = 2;
 
 pub(crate) fn add_request_to_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
@@ -446,12 +446,13 @@ pub(crate) async fn handle_classic(
 
     let preimage_hint: Box<
         dyn Fn(u16, Vec<u8>) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, Box<dyn Error>>>>>,
-    > = Box::new(|hint_type: u16, input: Vec<u8>| {
+    > = Box::new(|reason: u16, input: Vec<u8>| {
         Box::pin(async move {
+            let hint_type: u8 = input[0];
             match hint_type {
                 HINT_ETH_CODE_PREIMAGE => {
-                    let block_hash: [u8; 32] = input[0..32].try_into()?;
-                    let address: [u8; 20] = input[32..52].try_into()?;
+                    let block_hash: [u8; 32] = input[1..33].try_into()?;
+                    let address: [u8; 20] = input[33..53].try_into()?;
 
                     let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
                         .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
@@ -481,7 +482,7 @@ pub(crate) async fn handle_classic(
                     Ok(vec![])
                 }
                 HINT_ETH_BLOCK_PREIMAGE => {
-                    let block_hash: [u8; 32] = input[0..32].try_into()?;
+                    let block_hash: [u8; 32] = input[1..33].try_into()?;
 
                     let ethereum_endpoint = var("ETHEREUM_ENDPOINT")
                         .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
