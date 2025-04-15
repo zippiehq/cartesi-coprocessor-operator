@@ -4,26 +4,38 @@ use advance_runner::{run_advance, Callback};
 use alloy_primitives::Keccak256;
 use alloy_primitives::{Address, FixedBytes, U256};
 use alloy_provider::{Provider, ProviderBuilder};
-use alloy_rlp::BufMut;
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockId, BlockTransactionsKind, RpcBlockHash};
-
 use futures_channel::oneshot::Sender;
 use hyper::{body::to_bytes, Body, Client, Request};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use reqwest::Url;
 use rusqlite::params;
-use serde_json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Condvar;
 use std::sync::{Arc, Mutex};
 use std::{env::var, error::Error, vec};
-use tracing::{debug, error, info_span, instrument, trace, warn};
+
+#[cfg(feature = "bls_signing")]
+use signer_eigen::SignerEigen;
+
+#[cfg(any(feature = "nitro_attestation", feature = "bls_signing"))]
+use crate::get_data_for_signing;
+
+#[cfg(feature = "nitro_attestation")]
+use crate::get_attestation;
+#[cfg(feature = "nitro_attestation")]
+use base64::prelude::BASE64_STANDARD;
+#[cfg(feature = "nitro_attestation")]
+use base64::Engine;
+
+use tracing::{instrument, warn};
 
 const GET_STORAGE_GIO: u32 = 0x27;
 const _GET_CODE_GIO: u32 = 0x28; // unused
@@ -45,6 +57,7 @@ pub(crate) fn add_request_to_database(
     payload: &Vec<u8>,
     no_console_putchar: &bool,
     priority: &i64,
+    ruleset_bytes: &Vec<u8>,
 ) -> i64 {
     tracing::info!("Starting to add request to database");
     let no_console_putchar: i64 = match no_console_putchar {
@@ -52,11 +65,11 @@ pub(crate) fn add_request_to_database(
         false => 0,
     };
     tracing::info!(
-        "Inserting request into database: machine_snapshot_path={:?}, payload_length={}, no_console_putchar={}, priority={}",
-        machine_snapshot_path, payload.len(), no_console_putchar, priority
+        "Inserting request into database: machine_snapshot_path={:?}, payload_length={}, no_console_putchar={}, priority={}, ruleset_bytes={:?}",
+        machine_snapshot_path, payload.len(), no_console_putchar, priority, ruleset_bytes
     );
     // Write down new request to the DB
-    let id: i64  = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority], |row| row.get(0)).unwrap();
+    let id: i64  = sqlite_connection.query_row("INSERT INTO requests (machine_snapshot_path, payload, no_console_putchar, priority, ruleset_bytes) VALUES (?, ?, ?, ?, ?) RETURNING id;", params![machine_snapshot_path.to_str(), payload, no_console_putchar, priority, ruleset_bytes], |row| row.get(0)).unwrap();
     let mut requests = requests.lock().unwrap();
     if let Some(sender_channel) = sender {
         requests.insert(id, sender_channel);
@@ -69,13 +82,14 @@ pub(crate) fn check_previously_handled_results(
     payload: &Vec<u8>,
     no_console_putchar: &bool,
     priority: &i64,
+    ruleset_bytes: &Vec<u8>,
 ) -> Option<i64> {
     tracing::info!("Checking previously handled results for machine_snapshot_path={:?}, payload_length={}, no_console_putchar={}, priority={}",
         machine_snapshot_path, payload.len(), no_console_putchar, priority
     );
     let mut statement = sqlite_connection
     .prepare(
-        "SELECT id FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ?;",
+        "SELECT id FROM results WHERE machine_snapshot_path = ? AND payload = ? AND no_console_putchar = ? AND priority = ? AND ruleset_bytes = ?;",
     )
     .unwrap();
 
@@ -84,7 +98,8 @@ pub(crate) fn check_previously_handled_results(
             machine_snapshot_path.to_str(),
             payload,
             no_console_putchar,
-            priority
+            priority,
+            ruleset_bytes
         ])
         .unwrap();
     if let Some(statement) = rows.next().unwrap() {
@@ -96,15 +111,7 @@ pub(crate) fn check_previously_handled_results(
 pub(crate) fn query_result_from_database(
     sqlite_connection: PooledConnection<SqliteConnectionManager>,
     id: &i64,
-) -> Result<
-    (
-        Option<Vec<(u16, Vec<u8>)>>,
-        Option<Vec<(u16, Vec<u8>)>>,
-        Option<(u16, Vec<u8>)>,
-        Option<advance_runner::YieldManualReason>,
-    ),
-    Box<dyn Error>,
-> {
+) -> Result<ClassicResult, Box<dyn Error>> {
     // Query the result from the DB
     let mut statement = sqlite_connection
         .prepare("SELECT * FROM results WHERE id = ?")
@@ -127,7 +134,17 @@ pub(crate) fn query_result_from_database(
                     4 => Some(YieldManualReason::Exception),
                     _ => None,
                 };
-                return Ok((outputs_vector, reports_vector, finish_result, reason));
+
+                return Ok(ClassicResult {
+                    outputs_vector,
+                    reports_vector,
+                    finish_result,
+                    #[cfg(feature = "nitro_attestation")]
+                    attestation_doc: statement.get::<_, String>(10).unwrap(),
+                    #[cfg(feature = "bls_signing")]
+                    bls_signature: statement.get::<_, String>(11).unwrap(),
+                    reason,
+                });
             }
             Ok(error_message) => {
                 tracing::error!(id = ?id, error = ?error_message, "Database query error occurred");
@@ -135,8 +152,7 @@ pub(crate) fn query_result_from_database(
             }
         }
     }
-    tracing::info!(id = ?id, "No results found in database");
-    return Ok((None, None, None, None));
+    return Err(Box::<dyn Error>::from("No queried data found"));
 }
 
 #[instrument(skip(sqlite_connection, new_record), fields(waiting_for_data = false))]
@@ -163,12 +179,14 @@ pub(crate) fn query_request_with_the_highest_priority(
         let mut rows = statement.query([]).unwrap();
         let res = rows.next().unwrap();
         if let Some(statement) = res {
+            let machine_snapshot_path: String = statement.get(1).unwrap();
             return ClassicRequest {
                 id: statement.get(0).unwrap(),
-                machine_snapshot_path: statement.get(1).unwrap(),
+                machine_snapshot_path: Path::new(&machine_snapshot_path).to_owned(),
                 payload: statement.get(2).unwrap(),
                 no_console_putchar: statement.get(3).unwrap(),
                 priority: statement.get(4).unwrap(),
+                ruleset_bytes: statement.get(5).unwrap(),
             };
         } else {
             tracing::info!("Waiting for new data to comme in");
@@ -202,8 +220,58 @@ pub(crate) async fn handle_database_request(
                 reason = reason,
                 "Inserting successful result into database"
             );
+            sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority, ruleset_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path.to_str().unwrap(), classic_request.payload, classic_request.no_console_putchar, classic_request.priority, classic_request.ruleset_bytes]).unwrap();
 
-            sqlite_connection.execute("INSERT INTO results (id, outputs_vector, reports_vector, finish_result, reason, machine_snapshot_path, payload, no_console_putchar, priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, bincode::serialize(&response.0.outputs_vector).unwrap(), bincode::serialize(&response.0.reports_vector).unwrap(), bincode::serialize(&response.0.finish_result).unwrap(), reason, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority]).unwrap();
+            #[cfg(feature = "nitro_attestation")]
+            {
+                let attestation_doc = get_nitro_attestation(
+                    &classic_request.ruleset_bytes,
+                    &classic_request
+                        .machine_snapshot_path
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap(),
+                    &classic_request.payload,
+                    response.0.finish_result.1.clone(),
+                )
+                .await;
+
+                sqlite_connection
+                    .execute(
+                        "UPDATE results SET attestation_doc = ? WHERE id = ?",
+                        params![attestation_doc, classic_request.id],
+                    )
+                    .unwrap();
+            }
+
+            #[cfg(feature = "bls_signing")]
+            {
+                match std::env::var("BLS_PRIVATE_KEY") {
+                    Ok(bls_private_key) => {
+                        let signature_bls = sign_bls(
+                            bls_private_key,
+                            &classic_request.ruleset_bytes,
+                            &classic_request
+                                .machine_snapshot_path
+                                .file_name()
+                                .unwrap()
+                                .to_str()
+                                .unwrap(),
+                            &classic_request.payload,
+                            response.0.finish_result.1.clone(),
+                        )
+                        .await;
+                        sqlite_connection
+                            .execute(
+                                "UPDATE results SET bls_signature = ? WHERE id = ?",
+                                params![signature_bls, classic_request.id],
+                            )
+                            .unwrap();
+                    }
+                    Err(_) => {}
+                };
+            }
         }
         Err(err) => {
             tracing::error!(
@@ -211,7 +279,7 @@ pub(crate) async fn handle_database_request(
                 "Error handling classic request: {}",
                 err
             );
-            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path, classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string()]).unwrap();
+            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message, ruleset_bytes) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path.to_str().unwrap(), classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string(), classic_request.ruleset_bytes]).unwrap();
         }
     }
     let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
@@ -223,6 +291,45 @@ pub(crate) async fn handle_database_request(
         }
         None => {}
     }
+}
+
+#[cfg(feature = "bls_signing")]
+async fn sign_bls(
+    bls_private_key: String,
+    ruleset_bytes: &Vec<u8>,
+    machine_hash: &str,
+    payload: &Vec<u8>,
+    finish_result_vec: Vec<u8>,
+) -> String {
+    tracing::info!("Starting BLS signing process");
+    let eigen_signer = SignerEigen::new(bls_private_key);
+
+    let keccak256_hash =
+        get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec).unwrap();
+    tracing::debug!("Keccak256 hash for BLS signing: {:?}", keccak256_hash);
+
+    let signature_hex = eigen_signer.sign(&keccak256_hash);
+    tracing::info!("BLS signature generated successfully");
+
+    return signature_hex;
+}
+
+#[cfg(feature = "nitro_attestation")]
+async fn get_nitro_attestation(
+    ruleset_bytes: &Vec<u8>,
+    machine_hash: &str,
+    payload: &Vec<u8>,
+    finish_result_vec: Vec<u8>,
+) -> String {
+    tracing::info!("Starting Nitro attestation process");
+
+    let keccak256_hash =
+        get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec).unwrap();
+    tracing::debug!("Keccak256 hash for Nitro attestation: {:?}", keccak256_hash);
+
+    let attestation_doc = BASE64_STANDARD.encode(get_attestation(keccak256_hash.as_slice()).await);
+    tracing::info!("Generated Nitro attestation document");
+    return attestation_doc;
 }
 
 pub(crate) async fn handle_classic(
@@ -552,7 +659,7 @@ pub(crate) async fn handle_classic(
     if machine_snapshot_path.join("config.json").exists() {
         tracing::info!("Found config.json, proceeding with run_advance");
         let reason = run_advance(
-            classic_request.machine_snapshot_path.clone(),
+            String::from(classic_request.machine_snapshot_path.to_str().unwrap()),
             None,
             classic_request.payload.clone(),
             HashMap::new(),
@@ -594,8 +701,20 @@ pub(crate) struct RunAdvanceResponses {
 
 pub(crate) struct ClassicRequest {
     pub id: i64,
-    pub machine_snapshot_path: String,
+    pub machine_snapshot_path: PathBuf,
     pub payload: Vec<u8>,
     pub no_console_putchar: i64,
     pub priority: i64,
+    pub ruleset_bytes: Vec<u8>,
+}
+
+pub struct ClassicResult {
+    pub outputs_vector: Option<Vec<(u16, Vec<u8>)>>,
+    pub reports_vector: Option<Vec<(u16, Vec<u8>)>>,
+    pub finish_result: Option<(u16, Vec<u8>)>,
+    #[cfg(feature = "nitro_attestation")]
+    pub attestation_doc: String,
+    #[cfg(feature = "bls_signing")]
+    pub bls_signature: String,
+    pub reason: Option<advance_runner::YieldManualReason>,
 }
