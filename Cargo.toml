@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 async-std = { version = "1", features = ["attributes", "tokio1"] }
-advance_runner = {git = "https://github.com/zippiehq/cartesi-advance-runner", rev = "3da5d2cf4f0aec424a9ce75946a1ef09e4078848"}
+advance_runner = {git = "https://github.com/zippiehq/cartesi-advance-runner", rev = "e80eb3950da3fa60834feeafe6f3aebfbc8cde20"}
 hyper = { version = "0.14", features = ["full"] }
 hyper-tls = "0.5.0"
 async-stream = "0.3.6"
@@ -36,7 +36,7 @@ committable = { git = "https://github.com/EspressoSystems/commit" }
 env_logger = "0.11.6"
 log = "0.4.26"
 ark-serialize = "0.5.0"
-tracing = "0.1"      
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-log = "0.2"
 [features]
