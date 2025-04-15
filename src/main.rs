@@ -1,9 +1,9 @@
 mod classic_request_handling;
 mod espresso_transaction;
 mod outputs_merkle;
+use crate::classic_request_handling::ClassicResult;
 use alloy_primitives::utils::{keccak256, Keccak256};
 use alloy_primitives::{FixedBytes, B256};
-use alloy_rlp::length_of_length;
 use async_std::fs::OpenOptions;
 use async_std::io::WriteExt;
 use base64::{prelude::BASE64_STANDARD, Engine};
@@ -21,15 +21,12 @@ use futures::StreamExt;
 use futures::TryStreamExt;
 use hex::FromHexError;
 use hyper::body::to_bytes;
-use hyper::client::{self, HttpConnector};
 use hyper::header::HeaderValue;
-use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::Uri;
 use hyper::{header, Body, Client, Method, Request, Response, Server, StatusCode};
 use hyper_tls::HttpsConnector;
 use ipfs_api_backend_hyper::IpfsApi;
-use log::info;
 use r2d2::Pool;
 use regex::Regex;
 use rs_car_ipfs::single_file::read_single_file_seek;
@@ -39,32 +36,25 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 use std::fs::OpenOptions as StdOpenOptions;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::path::Path;
-use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 use std::{convert::Infallible, net::SocketAddr};
 use std::{env, path::PathBuf};
-use tracing::{debug, error, info_span, instrument, trace, warn};
+use tracing::info_span;
 use tracing_subscriber::{fmt, EnvFilter};
 
 const HEIGHT: usize = 63;
+
 #[cfg(feature = "bls_signing")]
 use advance_runner::YieldManualReason;
-use async_std::fs::File;
-use async_std::io::BufReader;
-use async_std::io::ReadExt;
-use futures::stream;
+
 use r2d2_sqlite::rusqlite::params;
 use r2d2_sqlite::SqliteConnectionManager;
-#[cfg(feature = "bls_signing")]
-use signer_eigen::SignerEigen;
-use std::fs::File as OtherFile;
 use std::sync::Condvar;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 enum UploadState {
@@ -224,15 +214,23 @@ async fn main() {
         .query_row("PRAGMA journal_mode = WAL;", [], |_row| Ok(()))
         .expect("Failed to set WAL mode");
 
+    sqlite_connect
+        .execute(
+            "
+            DROP TABLE IF EXISTS requests;",
+            params![],
+        )
+        .unwrap();
     // Create table for requests
     sqlite_connect
         .execute(
             "CREATE TABLE IF NOT EXISTS requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-            machine_snapshot_path TEXT NOT NULL,
-            payload BLOB NOT NULL,
-            no_console_putchar INTEGER CHECK (no_console_putchar IN (1, 0)) NOT NULL,
-            priority INTEGER NOT NULL
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            machine_snapshot_path   TEXT NOT NULL,
+            payload                 BLOB NOT NULL,
+            no_console_putchar      INTEGER CHECK (no_console_putchar IN (1, 0)) NOT NULL,
+            priority                INTEGER NOT NULL,
+            ruleset_bytes         BLOB NOT NULL
         );",
             params![],
         )
@@ -259,6 +257,13 @@ async fn main() {
         )
         .unwrap();
 
+    sqlite_connect
+        .execute(
+            "
+            DROP TABLE IF EXISTS results;",
+            params![],
+        )
+        .unwrap();
     // Create table for results
     sqlite_connect
         .execute(
@@ -273,7 +278,10 @@ async fn main() {
             payload               BLOB NOT NULL,
             no_console_putchar    INTEGER CHECK (no_console_putchar IN (1, 0)) NOT NULL,
             priority              INTEGER,
-            error_message         TEXT
+            error_message         TEXT,
+            attestation_doc       TEXT,
+            bls_signature         TEXT,
+            ruleset_bytes         BLOB
             );",
             params![],
         )
@@ -351,9 +359,7 @@ async fn main() {
                 let start = Instant::now();
                 let method = req.method().clone();
                 let version = req.version();
-                let path = req.uri().path().to_owned();
                 let remote_addr = remote_addr;
-                let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
                 async move {
                     let path = req.uri().path().to_owned();
                     tracing::info!("Received request for path: {}", path);
@@ -441,7 +447,7 @@ async fn main() {
                             let machine_hashes_and_payloads: Vec<(String, Vec<u8>)> =
                                 decoder.decode().collect::<Result<_, _>>().unwrap();
                             let mut json_response: Value = Value::Null;
-                            let mut i = 1;
+
                             for i in 0..machine_hashes_and_payloads.len() {
                                 let (hash, payload) = &machine_hashes_and_payloads[i];
                                 let (id, was_written_successfully) =
@@ -467,7 +473,7 @@ async fn main() {
                                     let mut shared_state = lock.lock().unwrap();
                                     *shared_state = true;
                                     cvar.notify_one();
-                                    let mut json_id = serde_json::json!({
+                                    let json_id = serde_json::json!({
                                        "id": id,
                                        "hash": &hash,
                                        "payload": &payload,
@@ -479,7 +485,7 @@ async fn main() {
                                         "There is already such record in the database. Id = {}",
                                         id
                                     );
-                                    let mut json_id = serde_json::json!({
+                                    let json_id = serde_json::json!({
                                        "id": id,
                                        "hash": &hash,
                                        "payload": &payload,
@@ -502,47 +508,89 @@ async fn main() {
                                 .to_vec();
 
                             let mut json_response = Value::Null;
-
                             for id in ids {
                                 let sqlite_connection = pool.get().unwrap();
                                 match query_result_from_database(sqlite_connection, &(id as i64)) {
-                                    Ok((outputs_vector, reports_vector, finish_result, reason)) => {
+                                    Ok(ClassicResult {
+                                        outputs_vector,
+                                        reports_vector,
+                                        finish_result,
+                                        #[cfg(feature = "nitro_attestation")]
+                                        attestation_doc,
+                                        #[cfg(feature = "bls_signing")]
+                                        bls_signature,
+                                        reason,
+                                    }) => {
+                                        println!("outputs_vector {:?}, reports_vector {:?}, finish_result {:?}", outputs_vector, reports_vector, finish_result);
                                         let mut keccak_outputs = Vec::new();
+                                        match outputs_vector {
+                                            Some(outputs_vector_data) => {
+                                                // Generating proofs for each output
+                                                for output in &outputs_vector_data {
+                                                    let mut hasher = Keccak256::new();
+                                                    hasher.update(output.1.clone());
+                                                    let output_keccak =
+                                                        B256::from(hasher.finalize());
+                                                    keccak_outputs.push(output_keccak);
+                                                }
 
-                                        // Generating proofs for each output
-                                        for output in outputs_vector.as_ref().unwrap() {
-                                            let mut hasher = Keccak256::new();
-                                            hasher.update(output.1.clone());
-                                            let output_keccak = B256::from(hasher.finalize());
-                                            keccak_outputs.push(output_keccak);
-                                        }
-
-                                        let proofs =
-                                            outputs_merkle::create_proofs(keccak_outputs, HEIGHT)
+                                                let proofs = outputs_merkle::create_proofs(
+                                                    keccak_outputs,
+                                                    HEIGHT,
+                                                )
                                                 .unwrap();
-                                        if proofs.0.to_vec() != finish_result.as_ref().unwrap().1 {
-                                            tracing::error!("Merkle proof verification failed: outputs weren't proven successfully");
-                                            let json_error = serde_json::json!({
-                                                "error": "outputs weren't proven successfully",
-                                            });
-                                            let json_error =
-                                                serde_json::to_string(&json_error).unwrap();
+                                                if proofs.0.to_vec()
+                                                    != finish_result.as_ref().unwrap().1
+                                                {
+                                                    tracing::error!("Merkle proof verification failed: outputs weren't proven successfully");
+                                                    let json_error = serde_json::json!({
+                                                        "error": "outputs weren't proven successfully",
+                                                    });
+                                                    let json_error =
+                                                        serde_json::to_string(&json_error).unwrap();
 
-                                            let response = Response::builder()
-                                                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                                                .body(Body::from(json_error))
-                                                .unwrap();
+                                                    let response = Response::builder()
+                                                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                                                        .body(Body::from(json_error))
+                                                        .unwrap();
 
-                                            return Ok::<_, Infallible>(response);
+                                                    return Ok::<_, Infallible>(response);
+                                                }
+
+                                                let mut json_id = serde_json::json!({
+                                                   "outputs_callback_vector": &outputs_vector_data,
+                                                   "reports_callback_vector": &reports_vector,
+                                                });
+
+                                                #[cfg(feature = "nitro_attestation")]
+                                                {
+                                                    json_id["attestation_doc"] =
+                                                        serde_json::json!(&attestation_doc);
+                                                }
+
+                                                #[cfg(feature = "bls_signing")]
+                                                if std::env::var("BLS_PRIVATE_KEY").is_ok() {
+                                                    if reason == Some(YieldManualReason::Accepted) {
+                                                        json_id["finish_callback"] =
+                                                            serde_json::json!(finish_result);
+                                                    } else {
+                                                        json_id["finish_callback"] = serde_json::json!(
+                                                            finish_result.unwrap().1
+                                                        );
+                                                    }
+                                                    json_id["signature"] =
+                                                        serde_json::Value::String(bls_signature);
+                                                }
+                                                json_response[id.to_string()] = json_id;
+                                            }
+                                            None => {
+                                                tracing::error!("outputs_vector is empty");
+                                                let json_error = serde_json::json!({
+                                                    "error": "outputs_vector is empty",
+                                                });
+                                                json_response[id.to_string()] = json_error;
+                                            }
                                         }
-
-                                        let mut json_id = serde_json::json!({
-                                           "outputs_callback_vector": &outputs_vector,
-                                           "reports_callback_vector": &reports_vector,
-                                           "finish_callback_vector": &finish_result,
-
-                                        });
-                                        json_response[id.to_string()] = json_id;
                                     }
                                     Err(error_message) => {
                                         tracing::error!(
@@ -552,6 +600,7 @@ async fn main() {
                                         let json_error = serde_json::json!({
                                             "error": error_message.to_string(),
                                         });
+                                        json_response[id.to_string()] = json_error;
                                     }
                                 }
                             }
@@ -654,14 +703,23 @@ async fn main() {
 
                                 tracing::info!("Waiting for request to be handled...");
                                 // Wait for request to be handled
-                                let id = receiver.await.unwrap();
+                                receiver.await.unwrap();
                             }
 
                             let sqlite_connection = pool.get().unwrap();
                             let result_from_database =
                                 query_result_from_database(sqlite_connection, &id);
                             match result_from_database {
-                                Ok((outputs_vector, reports_vector, finish_result, reason)) => {
+                                Ok(ClassicResult {
+                                    outputs_vector,
+                                    reports_vector,
+                                    finish_result,
+                                    #[cfg(feature = "nitro_attestation")]
+                                    attestation_doc,
+                                    #[cfg(feature = "bls_signing")]
+                                    bls_signature,
+                                    reason,
+                                }) => {
                                     let mut keccak_outputs = Vec::new();
 
                                     // Generating proofs for each output
@@ -698,55 +756,12 @@ async fn main() {
 
                                     #[cfg(feature = "nitro_attestation")]
                                     {
-                                        tracing::info!("Starting Nitro attestation process");
-                                        let finish_result_vec =
-                                            finish_result.as_ref().unwrap().1.clone();
-
-                                        let keccak256_hash = get_data_for_signing(
-                                            &ruleset_bytes,
-                                            machine_hash,
-                                            &payload,
-                                            &finish_result_vec,
-                                        )
-                                        .unwrap();
-                                        tracing::debug!(
-                                            "Keccak256 hash for Nitro attestation: {:?}",
-                                            keccak256_hash
-                                        );
-
-                                        let attestation_doc = BASE64_STANDARD.encode(
-                                            get_attestation(keccak256_hash.as_slice()).await,
-                                        );
-                                        tracing::info!("Generated Nitro attestation document");
                                         json_response["attestation_doc"] =
                                             serde_json::json!(&attestation_doc);
                                     }
 
                                     #[cfg(feature = "bls_signing")]
-                                    if signing_requested {
-                                        tracing::info!("Starting BLS signing process");
-                                        let bls_private_key_str = std::env::var("BLS_PRIVATE_KEY")
-                                            .expect("BLS_PRIVATE_KEY not set");
-                                        let eigen_signer = SignerEigen::new(bls_private_key_str);
-
-                                        let finish_result_vec =
-                                            finish_result.as_ref().unwrap().1.clone();
-
-                                        let keccak256_hash = get_data_for_signing(
-                                            &ruleset_bytes,
-                                            machine_hash,
-                                            &payload,
-                                            &finish_result_vec,
-                                        )
-                                        .unwrap();
-                                        tracing::debug!(
-                                            "Keccak256 hash for BLS signing: {:?}",
-                                            keccak256_hash
-                                        );
-
-                                        let signature_hex = eigen_signer.sign(&keccak256_hash);
-                                        tracing::info!("BLS signature generated successfully");
-
+                                    if std::env::var("BLS_PRIVATE_KEY").is_ok() {
                                         if reason == Some(YieldManualReason::Accepted) {
                                             json_response["finish_callback"] =
                                                 serde_json::json!(finish_result);
@@ -755,8 +770,9 @@ async fn main() {
                                                 serde_json::json!(finish_result.unwrap().1);
                                         }
                                         json_response["signature"] =
-                                            serde_json::Value::String(signature_hex);
+                                            serde_json::Value::String(bls_signature);
                                     }
+
                                     let json_response =
                                         serde_json::to_string(&json_response).unwrap();
 
@@ -1336,7 +1352,7 @@ async fn main() {
                                 }
                             };
                             {
-                                let mut map = upload_status_map.lock().unwrap();
+                                let map = upload_status_map.lock().unwrap();
 
                                 if let Some(state) = map.get(&upload_id) {
                                     tracing::info!(
@@ -1414,7 +1430,6 @@ async fn main() {
                                     let upload_id_clone = upload_id.clone();
                                     let upload_dir_clone = upload_dir.clone();
                                     let presigned_url_clone = presigned_url.clone();
-                                    let client_clone = client.clone();
 
                                     async_std::task::spawn(async move {
                                         {
@@ -1891,7 +1906,7 @@ async fn validate_and_add_classic_request(
     max_ops: i64,
 ) -> Result<(i64, bool), Box<dyn std::error::Error>> {
     // Check machine_hash format
-    if let Err(err_response) = check_hash_format(
+    if let Err(_) = check_hash_format(
         machine_hash,
         "machine_hash should contain only symbols a-f 0-9 and have length 64",
     ) {
@@ -1925,6 +1940,7 @@ async fn validate_and_add_classic_request(
             &payload,
             &no_console_putchar,
             &priority,
+            ruleset_bytes,
         );
 
         match handled_request_id {
@@ -1948,6 +1964,7 @@ async fn validate_and_add_classic_request(
                         &payload,
                         &no_console_putchar,
                         &priority,
+                        ruleset_bytes,
                     );
                     // Return id of newly written request and indicate that it wasn't handled before
                     return Ok((id, true));
@@ -1980,83 +1997,6 @@ fn preimage_available(
     }
 }
 
-async fn generate_proofs(
-    outputs_vector: Option<Vec<(u16, Vec<u8>)>>,
-    reports_vector: Option<Vec<(u16, Vec<u8>)>>,
-    finish_result: Option<(u16, Vec<u8>)>,
-    reason: Option<advance_runner::YieldManualReason>,
-    machine_hash: &str,
-    payload: &Vec<u8>,
-    ruleset_bytes: &Vec<u8>,
-    max_ops: i64,
-) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut keccak_outputs = Vec::new();
-
-    // Generating proofs for each output
-    for output in outputs_vector.as_ref().unwrap() {
-        let mut hasher = Keccak256::new();
-        hasher.update(output.1.clone());
-        let output_keccak = B256::from(hasher.finalize());
-        keccak_outputs.push(output_keccak);
-    }
-
-    let proofs = outputs_merkle::create_proofs(keccak_outputs, HEIGHT).unwrap();
-    if proofs.0.to_vec() != finish_result.as_ref().unwrap().1 {
-        tracing::error!("Merkle proof verification failed: outputs weren't proven successfully");
-
-        return Err(Box::<dyn std::error::Error>::from(
-            "outputs weren't proven successfully",
-        ));
-    }
-
-    let mut json_response = serde_json::json!({
-       "outputs_callback_vector": &outputs_vector,
-       "reports_callback_vector": &reports_vector,
-    });
-
-    #[cfg(feature = "nitro_attestation")]
-    {
-        tracing::info!("Starting Nitro attestation process");
-        let finish_result_vec = finish_result.as_ref().unwrap().1.clone();
-
-        let keccak256_hash =
-            get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec)
-                .unwrap();
-        tracing::debug!("Keccak256 hash for Nitro attestation: {:?}", keccak256_hash);
-
-        let attestation_doc =
-            BASE64_STANDARD.encode(get_attestation(keccak256_hash.as_slice()).await);
-        tracing::info!("Generated Nitro attestation document");
-        json_response["attestation_doc"] = serde_json::json!(&attestation_doc);
-    }
-
-    #[cfg(feature = "bls_signing")]
-    if std::env::var("BLS_PRIVATE_KEY").is_ok() {
-        tracing::info!("Starting BLS signing process");
-        let bls_private_key_str =
-            std::env::var("BLS_PRIVATE_KEY").expect("BLS_PRIVATE_KEY not set");
-        let eigen_signer = SignerEigen::new(bls_private_key_str);
-
-        let finish_result_vec = finish_result.as_ref().unwrap().1.clone();
-
-        let keccak256_hash =
-            get_data_for_signing(&ruleset_bytes, machine_hash, &payload, &finish_result_vec)
-                .unwrap();
-        tracing::debug!("Keccak256 hash for BLS signing: {:?}", keccak256_hash);
-
-        let signature_hex = eigen_signer.sign(&keccak256_hash);
-        tracing::info!("BLS signature generated successfully");
-
-        if reason == Some(YieldManualReason::Accepted) {
-            json_response["finish_callback"] = serde_json::json!(finish_result);
-        } else {
-            json_response["finish_callback"] = serde_json::json!(finish_result.clone().unwrap().1);
-        }
-        json_response["signature"] = serde_json::Value::String(signature_hex);
-    }
-
-    return Ok(json_response);
-}
 fn record_exists(
     pool: &Pool<SqliteConnectionManager>,
     preimage_data: &(u8, Vec<u8>, Vec<u8>),
