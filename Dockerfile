@@ -1,5 +1,5 @@
 FROM rust:1.85.1 as base
-RUN apt-get update && apt-get install -y protobuf-compiler clang libboost1.81-dev git
+RUN apt-get update && apt-get install -y protobuf-compiler clang libboost1.81-dev git lua5.4
 
 FROM base as operator-cache
 WORKDIR /operator
