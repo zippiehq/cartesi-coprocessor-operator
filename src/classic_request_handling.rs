@@ -280,7 +280,7 @@ pub(crate) async fn handle_database_request(
                 "Error handling classic request: {}",
                 err
             );
-            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message, ruleset_bytes) VALUES (?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path.to_str().unwrap(), classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string(), classic_request.ruleset_bytes]).unwrap();
+            sqlite_connection.execute("INSERT INTO results (id, machine_snapshot_path, payload, no_console_putchar, priority, error_message, ruleset_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)", params![classic_request.id, classic_request.machine_snapshot_path.to_str().unwrap(), classic_request.payload, classic_request.no_console_putchar, classic_request.priority, err.to_string(), classic_request.ruleset_bytes]).unwrap();
         }
     }
     let mut requests: std::sync::MutexGuard<'_, HashMap<i64, Sender<i64>>> =
