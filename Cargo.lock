@@ -20,7 +20,7 @@ checksum = "512761e0bb2578dd7380c6baaa0f4ce03e84f95e960231d1dec8bf4d7d6e2627"
 [[package]]
 name = "advance_runner"
 version = "0.1.0"
-source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=3da5d2cf4f0aec424a9ce75946a1ef09e4078848#3da5d2cf4f0aec424a9ce75946a1ef09e4078848"
+source = "git+https://github.com/zippiehq/cartesi-advance-runner?rev=e80eb3950da3fa60834feeafe6f3aebfbc8cde20#e80eb3950da3fa60834feeafe6f3aebfbc8cde20"
 dependencies = [
  "alloy-primitives 0.7.7",
  "alloy-sol-types 0.7.7",
