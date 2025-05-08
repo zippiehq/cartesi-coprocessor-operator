@@ -26,7 +26,7 @@ async fn main() {
 
     if let Err(err) = register_for_operator_sets(&opts).await {
         log.error("failed to register for operator sets", &err.to_string());
-        return;
+        std::process::exit(1)
     }
 
     log.info("operator successfully registered", "")
@@ -182,7 +182,14 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
 
     let el_node_url =
         Url::parse(&opts.el_node_url).map_err(|err| anyhow!("invalid rpc url: {}", err))?;
-    wait_for_pendig_tx(el_node_url, tx_hash).await?;
+    let transaction_receipt = wait_for_pendig_tx(el_node_url, tx_hash).await?;
+
+    if !transaction_receipt.inner.status() {
+        return Err(anyhow!(
+            "transaction-receipt status {:?}",
+            transaction_receipt.inner
+        ));
+    }
 
     get_logger().info(
         "tx registerForOperatorSets successfully included",
