@@ -33,15 +33,15 @@ jobs:
       uses: docker/metadata-action@v5
       with:
           images: |
-                ghcr.io/zippiehq/cartesi-coprocessor-operator
+                ghcr.io/${{ github.repository_owner }}/coprocessor-operator
           tags: |
                 type=semver,pattern={{version}}
                 type=ref,event=pr
                 type=raw,value=testing,enable=${{ github.ref == format('refs/heads/{0}', 'testing') }}
                 type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
           labels: |
-                org.opencontainers.image.title=Cartesi Coprocessor Operator
-                org.opencontainers.image.description=Cartesi Coprocessor Operator
+                org.opencontainers.image.title=Coprocessor Operator
+                org.opencontainers.image.description=Coprocessor Operator
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3 
@@ -55,15 +55,12 @@ jobs:
 
     - name: Setup Depot ClI
       uses: depot/setup-action@v1
-      env:
-        DEPOT_TOKEN: ${{ secrets.DEPOT_API_TOKEN }}
   
     - name: Build and Push Docker Image with Depot
       uses: depot/bake-action@v1
       if:  ${{!startsWith(github.ref, 'refs/tags/') }}
       with:
-        project: hs0gfs4l0l
-        token: ${{ secrets.DEPOT_API_TOKEN }}
+        project: ${{ vars.DEPOT_PROJECT }}
         files: |
           ./docker-bake.hcl
           ./docker-bake.platforms.hcl
