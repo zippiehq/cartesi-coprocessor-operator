@@ -51,6 +51,9 @@ pub struct Options {
 
     #[clap(long, env = "EL_NODE_URL")]
     pub el_node_url: String,
+
+    #[clap(long, default_value_t = 1090000, env = "MAX_GAS")]
+    pub max_gas: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -132,6 +135,7 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
     let avs_deployment = opts.avs_deployment()?;
     let operator_address = opts.operator_address()?;
     let operator_bls_key_pair = opts.operator_bls_key_pair()?;
+    let max_gas = opts.max_gas;
 
     get_logger().info("registring operator", &operator_address.to_string());
 
@@ -163,7 +167,7 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
             vec![0],
             operator_bls_key_pair,
             &opts.operator_socket,
-            1090000,
+            max_gas,
         )
         .await;
 
