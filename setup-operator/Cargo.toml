@@ -4,21 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-alloy-signer-local = { version = "0.5.3", default-features = false }
-eigen-common = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
-eigen-client-elcontracts = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
-eigen-testing-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
-eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
-eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
-eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
-eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+alloy-signer-local = { version = "0.13.0", default-features = false }
+eigen-common = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-client-elcontracts = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-testing-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
 
 alloy-primitives = "0.8.23"
 alloy-sol-types = "0.8.23"
-alloy-json-rpc = "0.12.6"
-alloy-contract = "0.12.6"
-alloy-provider = "0.12.6"
-alloy-rpc-types = "0.12.6"
+alloy-json-rpc = "0.13.0"
+alloy-contract = "0.13.0"
+alloy-provider = "0.13.0"
+alloy-rpc-types = "0.13.0"
 
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }
 

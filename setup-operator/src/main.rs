@@ -157,12 +157,13 @@ async fn register_for_operator_sets(opts: &Options) -> Result<()> {
     );
 
     let result = el_writer
-        .register_for_operator_sets(
+        .register_for_operator_sets_with_gas(
             operator_address,
             avs_deployment.addresses.coprocessor_service_manager,
             vec![0],
             operator_bls_key_pair,
             &opts.operator_socket,
+            1090000,
         )
         .await;
 
