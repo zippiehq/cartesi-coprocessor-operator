@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "f9d6cb687584fac0a547cfc5df5bbccc91c3769a" }
+eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
 hex = "0.4"
 ark-serialize = "0.5.0"

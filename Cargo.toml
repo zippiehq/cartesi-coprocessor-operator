@@ -13,14 +13,14 @@ hex = "0.4"
 serde_json = "1.0.132"
 regex = "1.11.0"
 signer-eigen = { path = "signer-eigen", optional = true }
-rs-car-ipfs = { git = "https://github.com/zippiehq/rs-car-ipfs", rev = "2d893af9c9ab9aefe0e329bea4e8045b7f3015d7" }
+rs-car-ipfs = { git = "https://github.com/zippiehq/rs-car-ipfs", rev = "00a6a00284bd307032054247bfd75380e10a55fa" }
 ipfs-api-backend-hyper = { version = "0.6.0", features = ["with-send-sync"], default-features = false }
 futures = "0.3"
 cid = "0.8.6"
 alloy-primitives = "0.8.25"
-alloy-provider = "0.8.1"
-alloy-rpc-types-eth = "0.8.1"
-alloy-rlp = "0.3.11"
+alloy-provider = "0.13.0"
+alloy-rpc-types-eth = "0.13.0"
+alloy-rlp = "0.3.12"
 serde = "1.0.214"
 base64 = "0.22.1"
 rusqlite = { version = "0.25.3", features=["bundled"] }
