@@ -5,13 +5,13 @@ edition = "2021"
 
 [dependencies]
 alloy-signer-local = { version = "0.13.0", default-features = false }
-eigen-common = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
-eigen-client-elcontracts = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
-eigen-testing-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
-eigen-client-avsregistry = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
-eigen-logging = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
-eigen-crypto-bls = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
-eigen-utils = { git = "https://github.com/dymchenkko/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-common = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-client-elcontracts = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-testing-utils = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-client-avsregistry = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-logging = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-crypto-bls = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
+eigen-utils = { git = "https://github.com/zippiehq/eigensdk-rs", rev = "dcba03cedc9af91fb982538c31ac9463134ef5e9" }
 
 alloy-primitives = "0.8.23"
 alloy-sol-types = "0.8.23"

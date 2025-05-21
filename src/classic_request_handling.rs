@@ -612,10 +612,9 @@ pub(crate) async fn handle_classic(
                         .expect("ETHEREUM_ENDPOINT environment variable wasn't set");
                     let block = ProviderBuilder::new()
                         .on_http(Url::parse(&ethereum_endpoint)?)
-                        .get_block(
-                            BlockId::Hash(RpcBlockHash::from(FixedBytes::from(&block_hash))),
-                            BlockTransactionsKind::Hashes,
-                        )
+                        .get_block(BlockId::Hash(RpcBlockHash::from(FixedBytes::from(
+                            &block_hash,
+                        ))))
                         .await?;
 
                     if let Some(block) = block {
